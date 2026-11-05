@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
-	"hash/crc32"
 	"io"
 	"testing"
 )
@@ -33,6 +32,28 @@ func TestBitmapSetHasCount(t *testing.T) {
 	}
 }
 
+// TestBitmapKeepsExactSize uses a block count that is not a multiple of 8: the
+// padding bits of the last byte must not count as clusters.
+func TestBitmapKeepsExactSize(t *testing.T) {
+	b, err := NewBitmap(1001)
+	if err != nil {
+		t.Fatalf("NewBitmap: %v", err)
+	}
+	if got := b.Blocks(); got != 1001 {
+		t.Fatalf("Blocks: got %d, want 1001", got)
+	}
+	if got := len(b.Bytes()); got != 126 {
+		t.Fatalf("Bytes: got %d bytes, want 126", got)
+	}
+	b.Set(1000)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Set(1001) did not panic on a 1001-block bitmap")
+		}
+	}()
+	b.Set(1001)
+}
+
 func TestBitmapSetPanicsOutOfRange(t *testing.T) {
 	b, err := NewBitmap(8)
 	if err != nil {
@@ -52,9 +73,37 @@ func TestNewBitmapRejectsZero(t *testing.T) {
 	}
 }
 
+func TestParseBitmap(t *testing.T) {
+	b, err := ParseBitmap([]byte{0xff, 0x01}, 9)
+	if err != nil {
+		t.Fatalf("ParseBitmap: %v", err)
+	}
+	if got := b.Count(); got != 9 {
+		t.Fatalf("Count: got %d, want 9", got)
+	}
+
+	tests := []struct {
+		name   string
+		data   []byte
+		blocks uint64
+	}{
+		{"no blocks", nil, 0},
+		{"too short", []byte{0xff}, 9},
+		{"too long", []byte{0xff, 0x01, 0x00}, 9},
+		{"padding set", []byte{0xff, 0x03}, 9},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseBitmap(tc.data, tc.blocks); err == nil {
+				t.Fatal("ParseBitmap accepted a bad bitmap")
+			}
+		})
+	}
+}
+
 func TestChunkRoundTrip(t *testing.T) {
 	payload := []byte("compressed-bytes")
-	stream := AppendChunk(nil, payload, 4096)
+	stream := AppendChunk(nil, payload, 7, 4096)
 
 	h, got, err := ReadChunk(bytes.NewReader(stream), 4096)
 	if err != nil {
@@ -62,6 +111,9 @@ func TestChunkRoundTrip(t *testing.T) {
 	}
 	if h.Raw != 4096 {
 		t.Fatalf("Raw: got %d, want 4096", h.Raw)
+	}
+	if h.Index != 7 {
+		t.Fatalf("Index: got %d, want 7", h.Index)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("payload: got %q, want %q", got, payload)
@@ -72,8 +124,8 @@ func TestChunkRoundTrip(t *testing.T) {
 }
 
 func TestChunkGolden(t *testing.T) {
-	h := ChunkHeader{Compressed: 5, Raw: 4096, CRC32: 0x11223344}
-	const want = "050000000010000044332211"
+	h := ChunkHeader{Compressed: 5, Raw: 4096, Index: 7, CRC32: 0x11223344}
+	const want = "05000000001000000700000000000000" + "44332211"
 	if got := hex.EncodeToString(h.MarshalBinary()); got != want {
 		t.Fatalf("chunk header:\n got %s\nwant %s", got, want)
 	}
@@ -88,8 +140,11 @@ func TestChunkGolden(t *testing.T) {
 }
 
 func TestChunkVerifyRejectsCorruption(t *testing.T) {
-	payload := []byte("test")
-	h := ChunkHeader{Compressed: uint32(len(payload)), Raw: 4, CRC32: crc32.ChecksumIEEE(payload)}
+	stream := AppendChunk(nil, []byte("test"), 3, 4)
+	h, payload, err := ReadChunk(bytes.NewReader(stream), 4)
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
 	if err := h.Verify(payload); err != nil {
 		t.Fatalf("Verify on clean payload: %v", err)
 	}
@@ -98,6 +153,18 @@ func TestChunkVerifyRejectsCorruption(t *testing.T) {
 	corrupt[0] ^= 0xff
 	if err := h.Verify(corrupt); err == nil {
 		t.Fatal("Verify accepted a corrupted payload")
+	}
+
+	wrongIndex := h
+	wrongIndex.Index++
+	if err := wrongIndex.Verify(payload); err == nil {
+		t.Fatal("Verify accepted a corrupted index")
+	}
+
+	wrongRaw := h
+	wrongRaw.Raw++
+	if err := wrongRaw.Verify(payload); err == nil {
+		t.Fatal("Verify accepted a corrupted raw size")
 	}
 }
 
@@ -125,5 +192,11 @@ func TestReadChunkBoundsHeader(t *testing.T) {
 func TestReadChunkTruncated(t *testing.T) {
 	if _, _, err := ReadChunk(bytes.NewReader(nil), 1024); !errors.Is(err, io.EOF) {
 		t.Fatalf("got %v, want io.EOF", err)
+	}
+
+	stream := AppendChunk(nil, []byte("test"), 0, 4)
+	_, _, err := ReadChunk(bytes.NewReader(stream[:len(stream)-1]), 1024)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want io.ErrUnexpectedEOF", err)
 	}
 }
