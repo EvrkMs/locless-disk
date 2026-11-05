@@ -243,7 +243,7 @@ function formatSize(n) {
   return Math.max(1, Math.round(n / 2 ** 20)) + ' МБ';
 }
 
-const kindText = { agent: 'Проверка связи', clone: 'Клонирование', deploy: 'Развёртывание' };
+const kindText = { agent: 'Проверка связи', clone: 'Клонирование', deploy: 'Развёртывание', format: 'Форматирование' };
 const stateText = { queued: 'Ждёт загрузки ПК', started: 'Загружается WinPE', running: 'Выполняется', done: 'Готово', failed: 'Ошибка', cancelled: 'Отменена' };
 const stuck = t => !t.finishedAt && t.stage === 'Ошибка'; // the agent waits on its error screen
 
@@ -393,6 +393,7 @@ function hostActions(h) {
       confirm: `Стереть диск ${h.name}?`, run: () => post('deploy'),
     },
     { text: 'Проверить связь', run: () => post('agent') },
+    { text: 'Форматировать в том WB', danger: true, confirm: `Стереть диск ${h.name}?`, run: () => post('format') },
     null, edit, remove,
   ];
 }

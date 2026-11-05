@@ -235,7 +235,7 @@ func (h *server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch in.Kind {
-	case store.TaskAgent:
+	case store.TaskAgent, store.TaskFormat:
 		image = ""
 	case store.TaskClone, store.TaskDeploy:
 		if image == "" {

@@ -131,6 +131,9 @@ func (w *worker) attempt() error {
 	if task.Kind == proto.TaskKindDeploy {
 		return w.runDeploy(task)
 	}
+	if task.Kind == proto.TaskKindFormat {
+		return w.runFormat(task)
+	}
 	if len(task.Table) > 0 {
 		if err := w.repair(task.Table); err != nil {
 			return err

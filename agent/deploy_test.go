@@ -17,14 +17,15 @@ import (
 
 // fakeTarget is a disk that records what the agent does to it.
 type fakeTarget struct {
-	blocks   map[uint64][]byte // partition 3, by offset
-	checkErr error
-	prepared bool
-	finished bool
-	closed   bool
-	bootable bool
-	bootErr  error
-	grown    bool
+	blocks    map[uint64][]byte // partition 3, by offset
+	checkErr  error
+	prepared  bool
+	finished  bool
+	closed    bool
+	bootable  bool
+	bootErr   error
+	grown     bool
+	formatted string
 }
 
 func (d *fakeTarget) Describe() string                             { return "тестовый диск" }
@@ -32,7 +33,11 @@ func (d *fakeTarget) Fit(m proto.Manifest) (proto.Manifest, error) { return m, d
 func (d *fakeTarget) Grow(proto.Manifest) error                    { d.grown = true; return nil }
 func (d *fakeTarget) Prepare(proto.Manifest) error                 { d.prepared = true; return nil }
 func (d *fakeTarget) Finish() error                                { d.finished = true; return nil }
-func (d *fakeTarget) Close() error                                 { d.closed = true; return nil }
+func (d *fakeTarget) Format(label string) error {
+	d.formatted = label
+	return nil
+}
+func (d *fakeTarget) Close() error { d.closed = true; return nil }
 func (d *fakeTarget) MakeBootable(proto.Manifest) error {
 	if !d.closed {
 		return errors.New("bootable before the disk was released")
@@ -397,5 +402,54 @@ func TestCancelEndsTheWait(t *testing.T) {
 	}
 	if d.shrunk {
 		t.Fatal("a cancelled clone touched the disk")
+	}
+}
+
+// TestFormatMakesOneVolume: no image is involved, and the warning runs first.
+func TestFormatMakesOneVolume(t *testing.T) {
+	e := newCloneEnv(t)
+	ctx := context.Background()
+	if _, err := e.s.CreateTask(ctx, e.host.ID, store.TaskFormat, ""); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	d := &fakeTarget{}
+	w, _ := testWorker(e.url)
+	w.abort = make(chan struct{}, 1)
+	w.openTarget = func() (target, error) { return d, nil }
+	ticks := 0
+	w.sleep = func(time.Duration) {
+		if d.formatted != "" {
+			t.Error("formatted before the countdown ended")
+		}
+		ticks++
+	}
+	if err := w.attempt(); err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if d.formatted != proto.FormatLabel || ticks != confirmSeconds {
+		t.Fatalf("label %q, ticks %d", d.formatted, ticks)
+	}
+	hosts, _ := e.s.Hosts(ctx)
+	if h := hosts[0]; h.Task != nil || h.LastTask == nil || h.LastTask.Status != store.StatusDone {
+		t.Fatalf("host: %+v, last: %+v", h, h.LastTask)
+	}
+}
+
+// TestEscapeStopsTheFormat: the last chance to save a PC picked by mistake.
+func TestEscapeStopsTheFormat(t *testing.T) {
+	e := newCloneEnv(t)
+	if _, err := e.s.CreateTask(context.Background(), e.host.ID, store.TaskFormat, ""); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	d := &fakeTarget{}
+	w, _ := testWorker(e.url)
+	w.abort = make(chan struct{}, 1)
+	w.abort <- struct{}{}
+	w.openTarget = func() (target, error) { return d, nil }
+	if err := w.attempt(); err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if d.formatted != "" {
+		t.Fatal("the disk was formatted after Esc")
 	}
 }

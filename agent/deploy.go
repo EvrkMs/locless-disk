@@ -19,6 +19,8 @@ const imageWait = 10 * time.Second
 
 var deployStages = []string{"Сеть", "Сервер", "Запись диска", "Завершение"}
 
+var formatStages = []string{"Сеть", "Сервер", "Форматирование", "Завершение"}
+
 // target is a disk about to be overwritten.
 type target interface {
 	Describe() string
@@ -35,6 +37,9 @@ type target interface {
 	Close() error
 	// Grow stretches the file system over the partition. It runs after Close.
 	Grow(m proto.Manifest) error
+	// Format wipes the disk and leaves one empty NTFS volume with this label on all
+	// of it, without Prepare. Nothing else may hold the disk.
+	Format(label string) error
 	// MakeBootable adds Windows to the boot menu of the firmware, which a disk
 	// image cannot carry. It runs after Close, with the partitions back in Windows.
 	MakeBootable(m proto.Manifest) error
@@ -120,7 +125,7 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 		return err
 	}
 
-	if !w.confirmWipe(dst, task.Image) {
+	if !w.confirmWipe(dst, "образ "+task.Image) {
 		w.screen.log("отменено на компьютере")
 		if err := w.finish(task.ID, false, "отменено на компьютере"); err != nil {
 			return err
@@ -174,6 +179,49 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 	return nil
 }
 
+// runFormat wipes the disk into one empty volume.
+func (w *worker) runFormat(task *proto.AgentTask) error {
+	w.names = formatStages
+	w.setStage(stageCheck)
+	w.screen.update(func(st *ui.State) {
+		st.Phase, st.Percent = ui.PhaseDeploy, 0
+		st.Center, st.Caption = "0%", "подготовка"
+		st.Title, st.Detail = "Форматирование диска", "Том "+proto.FormatLabel
+	})
+	dst, err := w.openTarget()
+	if err != nil {
+		return fmt.Errorf("не удалось открыть диск: %w", err)
+	}
+	defer dst.Close()
+	w.screen.log("диск: " + dst.Describe())
+
+	if !w.confirmWipe(dst, "том "+proto.FormatLabel) {
+		w.screen.log("отменено на компьютере")
+		if err := w.finish(task.ID, false, "отменено на компьютере"); err != nil {
+			return err
+		}
+		w.showResult("Отменено", "Диск не изменён")
+		return nil
+	}
+	w.screen.update(func(st *ui.State) {
+		st.Center, st.Caption, st.Hint = "…", "форматирование", "Не выключайте компьютер"
+	})
+	if err := dst.Format(proto.FormatLabel); err != nil {
+		return fmt.Errorf("не удалось отформатировать диск: %w", err)
+	}
+	if len(task.Table) > 0 {
+		w.forgetTable() // the volume it was saved for is gone
+	}
+	w.setStage(stageFinish)
+	message := dst.Describe() + ", том " + proto.FormatLabel
+	if err := w.finish(task.ID, true, message); err != nil {
+		return err
+	}
+	w.screen.log("готово: " + message)
+	w.showResult("Готово", "Диск отформатирован: том "+proto.FormatLabel)
+	return nil
+}
+
 // waitTurn repeats ask while another PC has the image. The disk is still as it was,
 // so waiting costs nothing.
 func (w *worker) waitTurn(task *proto.AgentTask, ask func() error) error {
@@ -212,10 +260,11 @@ func (w *worker) waitTurn(task *proto.AgentTask, ask func() error) error {
 }
 
 // confirmWipe warns on the screen and returns false if the operator pressed Esc.
-func (w *worker) confirmWipe(dst target, image string) bool {
+func (w *worker) confirmWipe(dst target, result string) bool {
+	before := w.screen.snapshot()
 	w.screen.update(func(st *ui.State) {
 		st.Title = "Диск будет стёрт"
-		st.Detail = dst.Describe() + " → образ " + image
+		st.Detail = dst.Describe() + " → " + result
 	})
 	for left := confirmSeconds; left > 0; left-- {
 		w.screen.update(func(st *ui.State) {
@@ -229,9 +278,7 @@ func (w *worker) confirmWipe(dst target, image string) bool {
 		}
 		w.sleep(time.Second)
 	}
-	w.screen.update(func(st *ui.State) {
-		st.Title, st.Detail = "Развёртывание образа", "Образ "+image
-	})
+	w.screen.update(func(st *ui.State) { st.Title, st.Detail = before.Title, before.Detail })
 	return true
 }
 

@@ -7,6 +7,13 @@ const AgentConfigName = "fogs-agent.json"
 // touch the disk.
 const TaskKindCheck = "agent"
 
+// TaskKindFormat wipes the disk and leaves one empty volume on all of it, with no
+// EFI or other system partitions. It needs no image.
+const TaskKindFormat = "format"
+
+// FormatLabel is the name of that volume.
+const FormatLabel = "WB"
+
 // AgentConfig tells the agent who it is and where the server is.
 type AgentConfig struct {
 	Server string `json:"server"` // base URL, for example http://192.168.88.105:8080

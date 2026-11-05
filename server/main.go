@@ -34,7 +34,7 @@ func main() {
 	flag.StringVar(&cfg.root, "root", "", "directory served over TFTP and HTTP (required)")
 	flag.StringVar(&cfg.db, "db", "fogs.db", "SQLite database file")
 	flag.StringVar(&cfg.admin, "admin-addr", "127.0.0.1:8081", "address of the operator panel; must be loopback, it has no login")
-	flag.StringVar(&cfg.bootFile, "bootfile", "ipxe.efi", "first-stage boot file, relative to -root")
+	flag.StringVar(&cfg.bootFile, "bootfile", boot.ShimPath, "first-stage boot file, relative to -root")
 	flag.IntVar(&cfg.httpPort, "http-port", 8080, "port of the HTTP server for clients")
 	flag.StringVar(&cfg.log, "log", "locless.log", "log file; a crash no code could catch goes to the same name with .crash")
 	verbose := flag.Bool("v", false, "log debug messages")
@@ -151,7 +151,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		return err
 	}
 	defer root.Close()
-	for _, name := range []string{cfg.bootFile, boot.WimbootPath, boot.BootWimPath, boot.AgentPath} {
+	for _, name := range []string{cfg.bootFile, boot.IPXEPath, boot.WimbootPath, boot.BootWimPath, boot.AgentPath} {
 		if _, err := root.Stat(name); err != nil {
 			log.Warn("boot file is missing from -root", "file", name)
 		}

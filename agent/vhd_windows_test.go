@@ -317,3 +317,31 @@ func TestVHDCloneAndDeploy(t *testing.T) {
 		t.Logf("partition %d (%s) matches byte for byte", p.Number, formatBytes(p.Size))
 	}
 }
+
+// TestVHDFormat wipes a virtual disk into one volume and reads the table back.
+func TestVHDFormat(t *testing.T) {
+	n := diskFromEnv(t, "LOCLESS_VHD_FORMAT")
+	d, err := newWriteDisk(n)
+	if err != nil {
+		t.Fatalf("newWriteDisk: %v", err)
+	}
+	d.allowFormat = true
+	if err := d.Format(proto.FormatLabel); err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	table, err := readTable(n)
+	if err != nil {
+		t.Fatalf("readTable: %v", err)
+	}
+	style, entries, err := parseLayout(table)
+	if err != nil {
+		t.Fatalf("parseLayout: %v", err)
+	}
+	if style != partitionStyleGPT || len(entries) != 1 {
+		t.Fatalf("style %d, partitions %+v", style, entries)
+	}
+	if e := entries[0]; e.typeGUID == typeESP || e.typeGUID == typeMSR {
+		t.Fatalf("partition %+v", e)
+	}
+	t.Logf("one partition of %s on a disk of %s", formatBytes(entries[0].size), formatBytes(d.size))
+}

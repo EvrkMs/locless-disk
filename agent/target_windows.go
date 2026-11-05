@@ -53,15 +53,16 @@ func busType(number int) (uint32, error) {
 
 // writeDisk is the disk an image is deployed to.
 type writeDisk struct {
-	number   int
-	size     uint64
-	sector   uint32
-	existing []uint32            // partitions found before anything was changed
-	layout   []byte              // table as read, for its GPT usable area
-	fresh    bool                // not GPT: it gets a new, empty GPT first
-	parts    map[uint32]*os.File // partitions kept locked while the disk is written
-	disk     *os.File            // writes go here, past the size Windows remembers for a partition
-	offsets  map[uint32]uint64   // where each partition starts on this disk
+	number      int
+	size        uint64
+	sector      uint32
+	existing    []uint32            // partitions found before anything was changed
+	layout      []byte              // table as read, for its GPT usable area
+	fresh       bool                // not GPT: it gets a new, empty GPT first
+	allowFormat bool                // tests on a VHD; otherwise only WinPE may format
+	parts       map[uint32]*os.File // partitions kept locked while the disk is written
+	disk        *os.File            // writes go here, past the size Windows remembers for a partition
+	offsets     map[uint32]uint64   // where each partition starts on this disk
 }
 
 // openTarget finds the disk to overwrite, see chooseTarget. Only a disk inside the
@@ -242,25 +243,57 @@ func (d *physicalDisk) writeTable(table []byte, entries []tableEntry) error {
 	return nil
 }
 
-// createGPT puts an empty GPT on a disk that has no such table, and reads the
-// usable area Windows gave it.
-func (w *writeDisk) createGPT(disk syscall.Handle, m proto.Manifest) error {
+// emptyGPT writes a GPT with no partitions and returns the table Windows then reports.
+func emptyGPT(disk syscall.Handle, id []byte) ([]byte, error) {
 	in := make([]byte, 24) // CREATE_DISK with CREATE_DISK_GPT
 	binary.LittleEndian.PutUint32(in[0:], partitionStyleGPT)
-	copy(in[4:20], parseGUID(m.DiskGUID))
+	copy(in[4:20], id)
 	binary.LittleEndian.PutUint32(in[20:], maxTablePartitions)
 	if _, err := control2(disk, ioctlCreateDisk, in); err != nil {
-		return fmt.Errorf("создание GPT: %w", err)
+		return nil, fmt.Errorf("создание GPT: %w", err)
 	}
 	if _, err := control2(disk, ioctlUpdateProperties, nil); err != nil {
-		return fmt.Errorf("обновление диска: %w", err)
+		return nil, fmt.Errorf("обновление диска: %w", err)
 	}
 	layout, err := control(disk, ioctlDriveLayoutEx, nil, layoutEntriesAt+layoutEntrySize*maxTablePartitions)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if binary.LittleEndian.Uint32(layout[0:]) != partitionStyleGPT {
-		return errors.New("создание GPT: диск остался без GPT")
+		return nil, errors.New("создание GPT: диск остался без GPT")
+	}
+	return layout, nil
+}
+
+// Format wipes the disk. The GPT comes from a request and not from diskpart, whose
+// convert gpt adds a reserved partition: there must be one partition and no other.
+func (w *writeDisk) Format(label string) error {
+	if !w.allowFormat && !strings.EqualFold(os.Getenv("SystemDrive"), "X:") {
+		return errors.New("форматирование работает только в WinPE")
+	}
+	if err := runDiskpart(fmt.Sprintf("select disk %d", w.number), "clean"); err != nil {
+		return err
+	}
+	disk, err := openWritable(fmt.Sprintf(`\\.\PhysicalDrive%d`, w.number))
+	if err != nil {
+		return err
+	}
+	id := proto.NewID()
+	_, err = emptyGPT(disk, id[:])
+	syscall.CloseHandle(disk)
+	if err != nil {
+		return err
+	}
+	return runDiskpart(fmt.Sprintf("select disk %d", w.number), "rescan", "create partition primary",
+		"format fs=ntfs quick label="+label)
+}
+
+// createGPT puts an empty GPT on a disk that has no such table, and reads the
+// usable area Windows gave it.
+func (w *writeDisk) createGPT(disk syscall.Handle, m proto.Manifest) error {
+	layout, err := emptyGPT(disk, parseGUID(m.DiskGUID))
+	if err != nil {
+		return err
 	}
 	first := binary.LittleEndian.Uint64(layout[24:])
 	end := first + binary.LittleEndian.Uint64(layout[32:])

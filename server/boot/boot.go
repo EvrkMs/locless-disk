@@ -19,6 +19,11 @@ const AutoexecName = "autoexec.ipxe"
 // Paths inside the served directory that booting WinPE needs. Nothing else from
 // Microsoft is required: wimboot extracts the boot manager and BCD from boot.wim.
 const (
+	// ShimPath is what a PC gets first. Microsoft signed it, so it passes Secure Boot,
+	// and it loads IPXEPath, which has to be the build signed for it. The name
+	// matters: the shim finds iPXE by its own name.
+	ShimPath    = "ipxe-shim.efi"
+	IPXEPath    = "ipxe.efi"
 	WimbootPath = "wimboot"
 	BootWimPath = "WinPE/boot.wim"
 	AgentPath   = "agent/fogs-agent.exe"

@@ -30,6 +30,8 @@ const (
 	TaskClone = proto.TaskKindClone
 	// TaskDeploy writes an image over the disk of the PC.
 	TaskDeploy = proto.TaskKindDeploy
+	// TaskFormat wipes the disk of the PC into one empty volume.
+	TaskFormat = proto.TaskKindFormat
 )
 
 // Task statuses.
