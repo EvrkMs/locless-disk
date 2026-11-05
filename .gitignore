@@ -2,7 +2,8 @@
 /bin/
 /dist/
 *.exe
-*.fogs
+*.ldisk
+*.ldelta
 
 # Локальное окружение
 .idea/
@@ -10,11 +11,8 @@
 .DS_Store
 Thumbs.db
 *.log
-
-# Рабочий список MAC
-macs.txt
-# Рабочий список задач
-tasks.txt
+*.log.1
+*.log.crash
 
 # База сервера
 *.db

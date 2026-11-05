@@ -19,10 +19,10 @@ func testManifest() Manifest {
 		SectorSize: 512,
 		DiskGUID:   testGUID,
 		Partitions: []Partition{
-			{Number: 1, TypeGUID: testGUID, GUID: testGUID, Name: "EFI", Offset: 1 * mib, Size: 100 * mib, Policy: PolicyFixed, File: "p1.fogs"},
-			{Number: 2, TypeGUID: testGUID, GUID: testGUID, Offset: 101 * mib, Size: 16 * mib, Policy: PolicyFixed},
-			{Number: 3, TypeGUID: testGUID, GUID: testGUID, Offset: 117 * mib, Size: 500 * mib, Policy: PolicyFill, File: "p3.fogs"},
-			{Number: 4, TypeGUID: testGUID, GUID: testGUID, Attributes: 0x8000000000000001, Offset: 617 * mib, Size: 300 * mib, Policy: PolicyFixed, File: "p4.fogs"},
+			{Number: 1, TypeGUID: testGUID, GUID: testGUID, Name: "EFI", Offset: 1 * mib, Size: 100 * mib, Policy: PolicyFixed, Content: ContentBlocks},
+			{Number: 2, TypeGUID: testGUID, GUID: testGUID, Offset: 101 * mib, Size: 16 * mib, Policy: PolicyFixed, Content: ContentNone},
+			{Number: 3, TypeGUID: testGUID, GUID: testGUID, Offset: 117 * mib, Size: 500 * mib, Policy: PolicyFill, Content: ContentBlocks},
+			{Number: 4, TypeGUID: testGUID, GUID: testGUID, Attributes: 0x8000000000000001, Offset: 617 * mib, Size: 300 * mib, Policy: PolicyFixed, Content: ContentBlocks},
 		},
 	}
 }
@@ -51,7 +51,7 @@ func TestManifestKeys(t *testing.T) {
 	}
 	for _, key := range []string{
 		"version", "diskSize", "sectorSize", "diskGuid", "partitions",
-		"number", "typeGuid", "guid", "name", "attributes", "offset", "size", "policy", "file",
+		"number", "typeGuid", "guid", "name", "attributes", "offset", "size", "policy", "content",
 	} {
 		if !strings.Contains(string(b), `"`+key+`":`) {
 			t.Errorf("encoded manifest has no key %q", key)
@@ -73,6 +73,8 @@ func TestManifestValidate(t *testing.T) {
 		{"bad partition guid", func(m *Manifest) { m.Partitions[0].GUID = strings.Repeat("g", 36) }},
 		{"unknown policy", func(m *Manifest) { m.Partitions[0].Policy = "grow" }},
 		{"no policy", func(m *Manifest) { m.Partitions[0].Policy = "" }},
+		{"unknown content", func(m *Manifest) { m.Partitions[0].Content = "files" }},
+		{"no content", func(m *Manifest) { m.Partitions[0].Content = "" }},
 		{"zero size", func(m *Manifest) { m.Partitions[0].Size = 0 }},
 		{"unaligned offset", func(m *Manifest) { m.Partitions[0].Offset = 1000 }},
 		{"unaligned size", func(m *Manifest) { m.Partitions[0].Size = 1000 }},
@@ -81,12 +83,7 @@ func TestManifestValidate(t *testing.T) {
 		{"overlap", func(m *Manifest) { m.Partitions[1].Offset = 100 * mib }},
 		{"out of order", func(m *Manifest) { m.Partitions[0], m.Partitions[3] = m.Partitions[3], m.Partitions[0] }},
 		{"duplicate number", func(m *Manifest) { m.Partitions[1].Number = 1 }},
-		{"duplicate file", func(m *Manifest) { m.Partitions[3].File = "p1.fogs" }},
 		{"two fills", func(m *Manifest) { m.Partitions[3].Policy = PolicyFill }},
-		{"file with slash", func(m *Manifest) { m.Partitions[0].File = "../evil.fogs" }},
-		{"file with backslash", func(m *Manifest) { m.Partitions[0].File = `..\evil.fogs` }},
-		{"file with drive", func(m *Manifest) { m.Partitions[0].File = "C:evil.fogs" }},
-		{"file is parent dir", func(m *Manifest) { m.Partitions[0].File = ".." }},
 	}
 
 	for _, tc := range tests {

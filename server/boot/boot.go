@@ -9,10 +9,9 @@ import (
 	"net"
 	"net/http"
 	"strings"
-)
 
-// exitScript leaves iPXE, so UEFI moves on to the next entry: the local disk.
-const exitScript = "#!ipxe\nexit\n"
+	"fogs/proto"
+)
 
 // AutoexecName is the file iPXE asks the boot server for right after it starts.
 const AutoexecName = "autoexec.ipxe"
@@ -35,35 +34,38 @@ const winpeshl = "[LaunchApps]\r\n" +
 // Autoexec generates autoexec.ipxe for a server reachable at httpAddr.
 //
 // When this file exists iPXE runs it instead of its automatic boot, so the
-// script has to configure the network itself. Every failure ends in exit,
-// which hands the PC back to UEFI: a network problem must not stop it booting
+// script has to configure the network itself. Every failure ends in leaving iPXE,
+// so a network problem must not stop the PC booting
 // from disk. netX is the interface dhcp just opened.
-func Autoexec(httpAddr string) []byte {
+func Autoexec(httpAddr, exitMode string) []byte {
 	return fmt.Appendf(nil, `#!ipxe
 echo FOGs: requesting an address
 dhcp || dhcp || goto disk
 echo FOGs: ${netX/mac} got ${netX/ip}
 chain http://%s/boot.ipxe?mac=${netX/mac} || goto disk
 :disk
-exit
-`, httpAddr)
+%s`, httpAddr, leave(exitMode, httpAddr))
 }
 
 // agentScript boots WinPE from the official boot.wim. Index 1 is Windows PE;
 // wimboot would otherwise pick the installer that ISO images mark as bootable.
-// wimboot places the initrd files in X:\Windows\System32.
-func agentScript(httpAddr string) string {
+// wimboot places the initrd files in X:\Windows\System32. iPXE names an image
+// after the last part of the URL path, so the config URL must end in its file
+// name and carry the MAC in the path, not in a query.
+func agentScript(httpAddr string, mac net.HardwareAddr) string {
+	urlMAC := strings.ReplaceAll(mac.String(), ":", "-")
 	return fmt.Sprintf(`#!ipxe
 echo FOGs: loading WinPE
 kernel http://%[1]s/files/%[2]s index=1 || goto disk
 initrd http://%[1]s/winpeshl.ini winpeshl.ini || goto disk
+initrd http://%[1]s/agent/%[5]s/%[6]s %[6]s || goto disk
 initrd http://%[1]s/files/%[3]s fogs-agent.exe || goto disk
 initrd http://%[1]s/files/%[4]s boot.wim || goto disk
 boot || goto disk
 :disk
 echo FOGs: cannot load WinPE, booting from disk
 exit
-`, httpAddr, WimbootPath, AgentPath, BootWimPath)
+`, httpAddr, WimbootPath, AgentPath, BootWimPath, urlMAC, proto.AgentConfigName)
 }
 
 // Config is what the handler needs from the server.
@@ -73,10 +75,15 @@ type Config struct {
 	HasTask  func(net.HardwareAddr) bool // PCs that should boot the agent
 	Started  func(net.HardwareAddr)      // a PC was sent into WinPE
 	Files    fs.FS                       // served under /files/
+	ExitMode func() string               // how a PC leaves iPXE; nil means the default
+	Agent    AgentStore                  // tasks as the agent sees them
+	Clone    CloneManager                // receives images
+	Deploy   DeployManager               // sends images
 	Log      *slog.Logger
 }
 
-// New returns the handler for /boot.ipxe, /winpeshl.ini and /files/.
+// New returns the handler for everything clients ask for: /boot.ipxe,
+// /winpeshl.ini, /files/ and the agent's /agent/.
 func New(c Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boot.ipxe", func(w http.ResponseWriter, r *http.Request) {
@@ -87,13 +94,13 @@ func New(c Config) http.Handler {
 		}
 		known := c.Known(mac)
 		task := known && c.HasTask(mac)
-		script := exitScript
+		script := exitScript(c)
 		switch {
 		case task:
-			script = agentScript(c.HTTPAddr)
+			script = agentScript(c.HTTPAddr, mac)
 			c.Started(mac)
 		case known:
-			script = fmt.Sprintf("#!ipxe\necho FOGs: host %s has no task, booting from disk\nexit\n", mac)
+			script = fmt.Sprintf("#!ipxe\necho FOGs: host %s has no task, booting from disk\n%s", mac, leave(c.exitMode(), c.HTTPAddr))
 		}
 		c.Log.Info("boot script requested", "mac", mac.String(), "known", known, "task", task, "remote", r.RemoteAddr)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -112,5 +119,6 @@ func New(c Config) http.Handler {
 		c.Log.Info("file requested", "path", r.URL.Path, "remote", r.RemoteAddr)
 		files.ServeHTTP(w, r)
 	})
+	addAgentRoutes(mux, c)
 	return mux
 }

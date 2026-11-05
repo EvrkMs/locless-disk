@@ -7,9 +7,6 @@ import (
 	"strings"
 )
 
-// ManifestName is the file name of the manifest inside an image directory.
-const ManifestName = "manifest.json"
-
 // ManifestVersion is the current manifest format version.
 const ManifestVersion = 1
 
@@ -26,6 +23,16 @@ const (
 	PolicyFill SizePolicy = "fill"
 )
 
+// Content says what an image keeps of a partition.
+type Content string
+
+const (
+	// ContentBlocks stores the partition as blocks.
+	ContentBlocks Content = "blocks"
+	// ContentNone only creates the partition on deploy, as with MSR.
+	ContentNone Content = "none"
+)
+
 // Manifest describes the GPT disk an image was captured from.
 type Manifest struct {
 	Version    int         `json:"version"`
@@ -36,20 +43,17 @@ type Manifest struct {
 }
 
 // Partition is one GPT entry of the source disk.
-//
-// File names the image file holding the partition contents, relative to the
-// image directory. It is empty for a partition that is created but not
-// restored, such as MSR.
 type Partition struct {
-	Number     uint32     `json:"number"`
-	TypeGUID   string     `json:"typeGuid"`
-	GUID       string     `json:"guid"`
-	Name       string     `json:"name,omitempty"`
-	Attributes uint64     `json:"attributes,omitempty"`
-	Offset     uint64     `json:"offset"` // bytes from the start of the disk
-	Size       uint64     `json:"size"`   // bytes, as captured
-	Policy     SizePolicy `json:"policy"`
-	File       string     `json:"file,omitempty"`
+	Number       uint32     `json:"number"`
+	TypeGUID     string     `json:"typeGuid"`
+	GUID         string     `json:"guid"`
+	Name         string     `json:"name,omitempty"`
+	Attributes   uint64     `json:"attributes,omitempty"`
+	Offset       uint64     `json:"offset"`                 // bytes from the start of the disk
+	Size         uint64     `json:"size"`                   // bytes, as captured
+	OriginalSize uint64     `json:"originalSize,omitempty"` // before the shrink, if there was one
+	Policy       SizePolicy `json:"policy"`
+	Content      Content    `json:"content"`
 }
 
 // Validate reports whether the manifest describes a deployable disk.
@@ -71,7 +75,6 @@ func (m Manifest) Validate() error {
 	}
 
 	numbers := make(map[uint32]bool, len(m.Partitions))
-	files := make(map[string]bool, len(m.Partitions))
 	fills := 0
 	var end uint64
 	for _, p := range m.Partitions {
@@ -82,12 +85,6 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("proto: duplicate partition number %d", p.Number)
 		}
 		numbers[p.Number] = true
-		if p.File != "" {
-			if files[p.File] {
-				return fmt.Errorf("proto: file %q used by two partitions", p.File)
-			}
-			files[p.File] = true
-		}
 		if p.Offset < end {
 			return fmt.Errorf("proto: partition %d overlaps the previous one or is out of order", p.Number)
 		}
@@ -115,15 +112,17 @@ func (p Partition) validate(m Manifest) error {
 	default:
 		return fmt.Errorf("unknown size policy %q", p.Policy)
 	}
+	switch p.Content {
+	case ContentBlocks, ContentNone:
+	default:
+		return fmt.Errorf("unknown content %q", p.Content)
+	}
 	sector := uint64(m.SectorSize)
 	if p.Size == 0 || p.Offset%sector != 0 || p.Size%sector != 0 {
 		return fmt.Errorf("offset %d and size %d must be non-zero multiples of the sector size", p.Offset, p.Size)
 	}
 	if p.Size > m.DiskSize || p.Offset > m.DiskSize-p.Size {
 		return fmt.Errorf("extends past the end of a %d-byte disk", m.DiskSize)
-	}
-	if p.File != "" && !validFileName(p.File) {
-		return fmt.Errorf("bad file name %q", p.File)
 	}
 	return nil
 }
@@ -166,10 +165,4 @@ func validGUID(s string) bool {
 		}
 	}
 	return true
-}
-
-// validFileName reports whether name stays inside the image directory. The
-// manifest is input from disk, so it must not be able to point anywhere else.
-func validFileName(name string) bool {
-	return name != "." && name != ".." && !strings.ContainsAny(name, `/\:`)
 }

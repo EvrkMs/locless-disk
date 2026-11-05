@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"fogs/proto"
 )
 
 // started counts the PCs the handler sent into WinPE.
@@ -53,6 +55,7 @@ func TestTaskBootsWinPE(t *testing.T) {
 	for _, want := range []string{
 		"kernel http://192.168.88.105:8080/files/wimboot index=1 || goto disk",
 		"initrd http://192.168.88.105:8080/winpeshl.ini winpeshl.ini || goto disk",
+		"initrd http://192.168.88.105:8080/agent/aa-bb-cc-00-00-03/fogs-agent.json fogs-agent.json || goto disk",
 		"initrd http://192.168.88.105:8080/files/agent/fogs-agent.exe fogs-agent.exe || goto disk",
 		"initrd http://192.168.88.105:8080/files/WinPE/boot.wim boot.wim || goto disk",
 		"boot || goto disk",
@@ -69,7 +72,7 @@ func TestTaskBootsWinPE(t *testing.T) {
 // TestTaskNeedsKnownHost guards the allow list: a task alone must not start
 // WinPE on a PC that is not on the MAC list.
 func TestTaskNeedsKnownHost(t *testing.T) {
-	if _, body := get(t, http.MethodGet, "/boot.ipxe?mac=aa:bb:cc:00:00:04"); body != exitScript {
+	if _, body := get(t, http.MethodGet, "/boot.ipxe?mac=aa:bb:cc:00:00:04"); body != exitScript(Config{HTTPAddr: "192.168.88.105:8080"}) {
 		t.Fatalf("script: %q", body)
 	}
 }
@@ -98,7 +101,7 @@ func TestServesFiles(t *testing.T) {
 }
 
 func TestAutoexec(t *testing.T) {
-	script := string(Autoexec("192.168.88.105:8080"))
+	script := string(Autoexec("192.168.88.105:8080", proto.ExitFirmware))
 	lines := strings.Split(strings.TrimSpace(script), "\n")
 	if lines[0] != "#!ipxe" {
 		t.Fatalf("first line: %q", lines[0])
@@ -129,7 +132,7 @@ func TestKnownHost(t *testing.T) {
 
 func TestUnknownHostBootsFromDisk(t *testing.T) {
 	code, body := get(t, http.MethodGet, "/boot.ipxe?mac=aa:bb:cc:00:00:02")
-	if code != http.StatusOK || body != exitScript {
+	if code != http.StatusOK || body != exitScript(Config{HTTPAddr: "192.168.88.105:8080"}) {
 		t.Fatalf("status %d, script %q", code, body)
 	}
 }
@@ -151,5 +154,59 @@ func TestBadRequests(t *testing.T) {
 				t.Fatalf("status %d, want %d", code, tc.want)
 			}
 		})
+	}
+}
+
+func TestKnownHostWithoutTaskUsesSanboot(t *testing.T) {
+	_, body := get(t, http.MethodGet, "/boot.ipxe?mac=aa:bb:cc:00:00:01")
+	if !strings.Contains(body, "\nsanboot --no-describe") {
+		t.Fatalf("script: %q", body)
+	}
+}
+
+func TestLeaveDefaultsToSanboot(t *testing.T) {
+	script := exitScript(Config{HTTPAddr: "a:1"})
+	if !strings.HasPrefix(script, "#!ipxe\nsanboot --no-describe --drive 0 --filename "+bootManager+" || ") {
+		t.Fatalf("script: %q", script)
+	}
+	if !strings.HasSuffix(script, " || exit\n") {
+		t.Fatalf("no way out if sanboot fails: %q", script)
+	}
+}
+
+func TestLeaveModes(t *testing.T) {
+	if got := leave(proto.ExitFirmware, "a:1"); got != "exit\n" {
+		t.Fatalf("exit: %q", got)
+	}
+	if got := leave(proto.ExitRefind, "a:1"); got != "chain http://a:1/files/refind.efi || exit\n" {
+		t.Fatalf("refind: %q", got)
+	}
+	s := string(Autoexec("a:1", proto.ExitSanboot))
+	if !strings.Contains(s, ":disk\nsanboot ") {
+		t.Fatalf("autoexec: %s", s)
+	}
+}
+
+func TestExitModeIsReadOnEveryRequest(t *testing.T) {
+	mode := proto.ExitFirmware
+	h := New(Config{
+		HTTPAddr: "a:1",
+		Known:    func(net.HardwareAddr) bool { return false },
+		HasTask:  func(net.HardwareAddr) bool { return false },
+		ExitMode: func() string { return mode },
+		Files:    fstest.MapFS{},
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	request := func() string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/boot.ipxe?mac=aa:bb:cc:00:00:09", nil))
+		return w.Body.String()
+	}
+	if got := request(); got != "#!ipxe\nexit\n" {
+		t.Fatalf("script: %q", got)
+	}
+	mode = proto.ExitRefind
+	if got := request(); !strings.Contains(got, "refind.efi") {
+		t.Fatalf("script: %q", got)
 	}
 }

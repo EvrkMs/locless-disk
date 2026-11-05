@@ -36,7 +36,7 @@ func startServerWith(t *testing.T, dir string, generated map[string][]byte) *net
 	}
 	s := &Server{
 		Root:      root,
-		Generated: generated,
+		Generated: func(name string) []byte { return generated[name] },
 		Timeout:   50 * time.Millisecond,
 		Retries:   3,
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),

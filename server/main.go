@@ -7,17 +7,22 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"time"
 
+	"fogs/proto"
+	"fogs/recovery"
 	"fogs/server/boot"
 	"fogs/server/dhcp"
+	"fogs/server/imaging"
 	"fogs/server/store"
 	"fogs/server/tftp"
 	"fogs/server/web"
@@ -31,6 +36,7 @@ func main() {
 	flag.StringVar(&cfg.admin, "admin-addr", "127.0.0.1:8081", "address of the operator panel; must be loopback, it has no login")
 	flag.StringVar(&cfg.bootFile, "bootfile", "ipxe.efi", "first-stage boot file, relative to -root")
 	flag.IntVar(&cfg.httpPort, "http-port", 8080, "port of the HTTP server for clients")
+	flag.StringVar(&cfg.log, "log", "locless.log", "log file; a crash no code could catch goes to the same name with .crash")
 	verbose := flag.Bool("v", false, "log debug messages")
 	flag.Parse()
 
@@ -38,13 +44,38 @@ func main() {
 	if *verbose {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	// The file comes first: a service has no stderr, and a failed write ends the list.
+	var out io.Writer = os.Stderr
+	file, fileErr := openLog(cfg.log)
+	if fileErr == nil {
+		out = io.MultiWriter(file, os.Stderr)
+	}
+	log := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level}))
+	if fileErr != nil {
+		log.Warn("no log file, logging to stderr only", "err", fileErr)
+	}
+	keepCrashes(cfg.log+".crash", log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, cfg, log); err != nil {
-		log.Error("server stopped", "err", err)
+	err := recovery.Run(func() error { return run(ctx, cfg, log) })
+	if err != nil {
+		log.Error("server stopped", "err", err, "stack", recovery.StackOf(err))
 		os.Exit(1)
+	}
+}
+
+// keepCrashes sends what the runtime prints when it dies to a file. Some failures,
+// like running out of memory, cannot be recovered from, and this is all they leave.
+func keepCrashes(path string, log *slog.Logger) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Warn("no crash file", "err", err)
+		return
+	}
+	defer f.Close() // the runtime keeps its own copy of the handle
+	if err := debug.SetCrashOutput(f, debug.CrashOptions{}); err != nil {
+		log.Warn("no crash file", "err", err)
 	}
 }
 
@@ -56,6 +87,7 @@ type config struct {
 	admin    string
 	bootFile string
 	httpPort int
+	log      string
 }
 
 // parseIP returns the server address. A wildcard is refused: other services
@@ -179,6 +211,18 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	}
 	known := check("host", db.IsHost)
 
+	// exitMode falls back to the default rather than failing a boot.
+	exitMode := func() string {
+		mode, err := db.Setting(ctx, store.SettingExitMode)
+		if err != nil {
+			log.Error("database query failed", "query", "exit mode", "err", err)
+		}
+		if !proto.ValidExitMode(mode) {
+			return proto.ExitSanboot
+		}
+		return mode
+	}
+
 	proxy := &dhcp.Proxy{
 		ServerIP: ip,
 		BootFile: cfg.bootFile,
@@ -190,32 +234,47 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		Log:   log.With("service", "dhcp"),
 	}
 	files := &tftp.Server{
-		Root:      root,
-		Generated: map[string][]byte{boot.AutoexecName: boot.Autoexec(httpAddr)},
-		Log:       log.With("service", "tftp"),
+		Root: root,
+		Generated: func(name string) []byte {
+			if name == boot.AutoexecName {
+				return boot.Autoexec(httpAddr, exitMode())
+			}
+			return nil
+		},
+		Log: log.With("service", "tftp"),
 	}
+	images := imaging.New(db, log.With("service", "imaging"))
 	clients := &http.Server{
-		Handler: boot.New(boot.Config{
+		Handler: recovery.Handler(log.With("service", "http"), boot.New(boot.Config{
 			HTTPAddr: httpAddr,
 			Known:    known,
 			HasTask:  check("task", db.HasTask),
 			Started:  record("started", db.MarkStarted),
+			ExitMode: exitMode,
 			Files:    root.FS(),
+			Agent:    db,
+			Clone:    images,
+			Deploy:   images,
 			Log:      log.With("service", "http"),
-		}),
+		})),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	panel := &http.Server{
-		Handler:           web.New(db, cfg.admin, log.With("service", "panel")),
+		Handler:           recovery.Handler(log.With("service", "panel"), web.New(web.Config{Store: db, Images: images, Addr: cfg.admin, Root: cfg.root, Log: log.With("service", "panel")})),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// A panic in one service must not stop the others: it logs and starts again.
+	keep := func(name string, serve func() error) func() error {
+		return func() error { return recovery.Keep(ctx, log, name, serve) }
+	}
 	services := []func() error{
-		func() error { return proxy.ServeDHCP(ctx, dhcpConn) },
-		func() error { return proxy.ServeBoot(ctx, bootConn) },
-		func() error { return files.Serve(ctx, tftpConn) },
-		func() error { return serveHTTP(clients, httpLn) },
-		func() error { return serveHTTP(panel, adminLn) },
+		keep("dhcp", func() error { return proxy.ServeDHCP(ctx, dhcpConn) }),
+		keep("boot", func() error { return proxy.ServeBoot(ctx, bootConn) }),
+		keep("tftp", func() error { return files.Serve(ctx, tftpConn) }),
+		keep("http", func() error { return serveHTTP(clients, httpLn) }),
+		keep("panel", func() error { return serveHTTP(panel, adminLn) }),
+		keep("imaging", func() error { images.Run(ctx); return nil }),
 	}
 	errs := make(chan error, len(services))
 	for _, serve := range services {

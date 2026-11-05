@@ -8,81 +8,263 @@
 :root {
   --bg: #14161a; --panel: #1b1e23; --line: #2f3238;
   --text: #e9e8e3; --soft: #b4b2a9; --muted: #888780;
-  --teal: #5dcaa5; --purple: #afa9ec; --coral: #f0997b;
+  --teal: #5dcaa5; --purple: #afa9ec; --coral: #f0997b; --red: #e24b4a;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
-main { max-width: 1040px; margin: 0 auto; padding: 32px 24px 64px; }
-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 28px; }
-h1 { font-size: 24px; font-weight: 600; margin: 0; }
+.app { display: flex; min-height: 100vh; }
+.side { flex: 0 0 200px; border-right: 1px solid var(--line); padding: 28px 12px; display: flex; flex-direction: column; gap: 4px; }
+.brand { font-size: 20px; font-weight: 600; padding: 0 12px 20px; }
+.side a { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; color: var(--soft); text-decoration: none; }
+.side a:hover { background: var(--panel); color: var(--text); }
+.side a[aria-current="page"] { background: var(--panel); color: var(--text); font-weight: 500; box-shadow: inset 2px 0 0 var(--teal); }
+.side .badge { font-size: 12px; color: #10231c; background: var(--teal); border-radius: 999px; padding: 0 7px; font-weight: 500; }
+.side .badge.danger { color: #fff; background: var(--red); }
+.lost { color: var(--red); }
+.nodot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--red); margin-right: 8px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.link { margin-top: auto; padding: 12px 12px 0; }
+main { flex: 1; min-width: 0; max-width: 1480px; padding: 32px 28px 64px; }
+h1 { font-size: 22px; font-weight: 600; margin: 0 0 22px; }
+.page[hidden] { display: none; }
+.field { padding: 14px 18px; border-top: 1px solid var(--line); }
+.field label { display: block; font-size: 13px; color: var(--soft); margin-bottom: 6px; }
+.field .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.field .row input { flex: 1 1 260px; }
+.field p { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.field .value { font-family: Consolas, ui-monospace, monospace; font-size: 13px; color: var(--text); }
+.saved { color: var(--teal); }
 h2 { font-size: 16px; font-weight: 600; margin: 0; }
 .link { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); }
 .dot.off { background: var(--coral); }
-section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 20px; overflow-x: auto; }
 .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; }
 .count { color: var(--muted); font-size: 13px; }
 table { width: 100%; border-collapse: collapse; }
-th { text-align: left; font-size: 12px; font-weight: 500; color: var(--muted); padding: 8px 18px; border-top: 1px solid var(--line); }
-td { padding: 10px 18px; border-top: 1px solid var(--line); vertical-align: middle; }
+th { text-align: left; font-size: 12px; font-weight: 500; color: var(--muted); padding: 8px 12px; border-top: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px 12px; border-top: 1px solid var(--line); vertical-align: middle; color: var(--soft); font-size: 14px; }
+th:first-child, td:first-child { padding-left: 18px; }
+th:last-child, td:last-child { padding-right: 18px; }
+.cols th[tabindex] { cursor: pointer; user-select: none; }
+.cols th[tabindex]:hover { color: var(--text); }
+.cols th[aria-pressed="true"] { color: var(--teal); }
+.cols td.actions, #imageTable td.actions { position: sticky; right: 0; background: var(--panel); box-shadow: -8px 0 8px -8px rgba(0, 0, 0, .6); }
+.message { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar { display: inline-block; width: 70px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; vertical-align: middle; margin-right: 8px; }
+.bar span { display: block; height: 100%; background: var(--teal); }
+.bar.failed span { background: var(--red); }
+.menu { position: fixed; z-index: 10; min-width: 220px; padding: 6px; background: var(--panel); border: 1px solid var(--muted); border-radius: 10px; box-shadow: 0 8px 24px rgba(0, 0, 0, .45); }
+.menu button { display: block; width: 100%; text-align: left; border: 0; border-radius: 6px; padding: 7px 10px; }
+.menu button:hover:not(:disabled), .menu button:focus-visible { background: var(--line); outline: none; }
+.menu button.danger { color: var(--coral); }
+.menu small { display: block; color: var(--muted); font-size: 12px; }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+dialog { width: min(440px, calc(100vw - 32px)); padding: 0; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+dialog::backdrop { background: rgba(0, 0, 0, .6); }
+dialog h2 { padding: 18px 20px 4px; }
+dialog form { display: block; padding: 0; border: 0; }
+dialog .field { border: 0; padding: 10px 20px; }
+dialog input, dialog select { width: 100%; max-width: none; }
+dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; }
+dialog .alert { margin: 8px 20px 0; }
 .mac { font-family: Consolas, ui-monospace, monospace; font-size: 13px; color: var(--soft); }
 .when { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .actions { text-align: right; white-space: nowrap; }
 .chip { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px; color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
 .chip.queued { color: var(--purple); border-color: var(--purple); }
-.chip.started { color: var(--teal); border-color: var(--teal); }
+.chip.started, .chip.running, .chip.done { color: var(--teal); border-color: var(--teal); }
+.chip.failed { color: var(--coral); border-color: var(--coral); }
+.sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
 button { font: inherit; font-size: 13px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
 button:hover { border-color: var(--muted); }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outline-offset: 1px; }
 button.main { background: var(--teal); border-color: var(--teal); color: #10231c; font-weight: 500; }
 button.quiet { border-color: transparent; color: var(--muted); }
 button.quiet:hover { color: var(--coral); }
-.name { background: none; border: 0; padding: 0; color: var(--text); font-size: 15px; font-weight: 500; }
-.name:hover { color: var(--teal); }
+button.danger { color: var(--coral); border-color: var(--coral); }
+select { font: inherit; font-size: 13px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; max-width: 150px; }
+#exitMode { max-width: 100%; }
+.name { color: var(--text); font-size: 15px; font-weight: 500; white-space: nowrap; }
 input { font: inherit; font-size: 14px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; min-width: 0; }
 form { display: flex; gap: 8px; flex-wrap: wrap; padding: 14px 18px; border-top: 1px solid var(--line); }
 form input { flex: 1 1 180px; }
 .empty { padding: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 #error { display: none; background: #3a2019; color: var(--coral); border: 1px solid var(--coral); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; }
 #error.show { display: block; }
-@media (max-width: 640px) { .hide-sm { display: none; } th, td { padding-left: 12px; padding-right: 12px; } }
+.alert { background: #3a2019; color: var(--coral); border: 1px solid var(--coral); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; }
+.alert[hidden] { display: none; }
+@media (max-width: 720px) {
+  .app { flex-direction: column; min-height: 0; }
+  .side { flex: none; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 12px; }
+  .brand { padding: 0 12px 0 4px; }
+  .link { margin: 0 0 0 auto; padding: 0 4px; }
+  main { padding: 20px 14px 48px; }
+  .hide-sm { display: none; }
+  th, td { padding-left: 10px; padding-right: 10px; }
+  .actions { white-space: normal; }
+  .actions button { margin-top: 4px; }
+}
 </style>
+<style id="hotColumns"></style>
 </head>
 <body>
+<div class="app">
+<nav class="side" aria-label="Разделы">
+  <div class="brand">FOGs</div>
+  <a href="#pcs" data-page="pcs">ПК<span class="badge" id="foundBadge" hidden title="Обнаружены новые ПК"></span></a>
+  <a href="#tasks" data-page="tasks">Задачи<span class="badge" id="taskBadge" hidden title="Активные задачи"></span></a>
+  <a href="#images" data-page="images">Образы<span class="badge danger" id="imageBadge" hidden title="Файлы образов не найдены"></span></a>
+  <a href="#settings" data-page="settings">Настройки</a>
+  <div class="link"><span class="dot" id="dot"></span><span id="link">подключение…</span></div>
+</nav>
 <main>
-  <header>
-    <h1>FOGs</h1>
-    <div class="link"><span class="dot" id="dot"></span><span id="link">подключение…</span></div>
-  </header>
   <div id="error" role="alert"></div>
+  <div id="storage" class="alert" hidden>Папка образов недоступна. Проверьте диск и настройки, задачи с такими образами сейчас не запускаются.</div>
 
+  <div class="page" id="page-pcs">
+  <h1>ПК</h1>
   <section>
-    <div class="head"><h2>Компьютеры</h2><span class="count" id="hostCount"></span></div>
-    <table id="hostTable">
-      <thead><tr><th>Имя</th><th>MAC</th><th class="hide-sm">Был в сети</th><th>Задача</th><th></th></tr></thead>
+    <div class="head"><h2>Компьютеры <span class="count" id="hostCount"></span></h2><button type="button" class="main" id="addHost">Добавить ПК</button></div>
+    <table id="hostTable" class="cols">
+      <thead><tr><th>Имя</th><th>MAC</th><th>Образ</th><th class="hide-sm">Был в сети</th><th>Задача</th><th>Статус</th><th class="hide-sm">Этап</th><th>Прогресс</th><th class="hide-sm">Результат</th><th class="hide-sm">Завершена</th><th aria-label="Действия"></th></tr></thead>
       <tbody id="hosts"></tbody>
     </table>
     <div class="empty" id="noHosts">Компьютеров пока нет. Загрузите ПК по сети, и он появится в обнаруженных, или добавьте его по MAC.</div>
-    <form id="addForm">
-      <input id="newMac" placeholder="04:7c:16:e7:d2:1e" aria-label="MAC-адрес" required>
-      <input id="newName" placeholder="PC-01" aria-label="Имя" maxlength="64" required>
-      <button type="submit">Добавить компьютер</button>
-    </form>
   </section>
 
   <section>
     <div class="head"><h2>Обнаружены в сети</h2><span class="count" id="foundCount"></span></div>
     <table id="foundTable">
-      <thead><tr><th>MAC</th><th>Был в сети</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th class="hide-sm">Был в сети</th><th></th></tr></thead>
       <tbody id="found"></tbody>
     </table>
     <div class="empty" id="noFound">Незарегистрированные ПК, загрузившиеся по сети, появятся здесь. Сервер им не отвечает, пока вы их не добавите.</div>
   </section>
+  </div>
+
+  <div class="page" id="page-tasks" hidden>
+  <h1>Задачи</h1>
+  <section>
+    <div class="head"><h2>Выполняются <span class="count" id="activeCount"></span></h2></div>
+    <table id="activeTable" class="cols">
+      <thead><tr><th>ПК</th><th>Задача</th><th>Образ</th><th>Статус</th><th class="hide-sm">Этап</th><th>Прогресс</th><th class="hide-sm">Сообщение</th><th class="hide-sm">Создана</th><th aria-label="Действия"></th></tr></thead>
+      <tbody id="active"></tbody>
+    </table>
+    <div class="empty" id="noActive">Сейчас задач нет. Запустить задачу можно в разделе «ПК».</div>
+  </section>
+  <section>
+    <div class="head"><h2>История <span class="count" id="doneCount"></span></h2><button type="button" id="onlyErrors" aria-pressed="false">Только ошибки</button></div>
+    <table id="doneTable" class="cols">
+      <thead><tr><th>ПК</th><th>Задача</th><th>Образ</th><th>Статус</th><th>Сообщение</th><th class="hide-sm">Создана</th><th>Завершена</th></tr></thead>
+      <tbody id="done"></tbody>
+    </table>
+    <div class="empty" id="noDone">Завершённых задач нет.</div>
+  </section>
+  </div>
+
+  <div class="page" id="page-images" hidden>
+  <h1>Образы</h1>
+  <section>
+    <div class="head"><h2>Сохранённые образы</h2><span class="count" id="imageCount"></span></div>
+    <table id="imageTable">
+      <thead><tr><th>Образ</th><th>Количество ПК</th><th>Используется задачей</th><th>Версия</th><th>Размер</th><th class="hide-sm">Снят с</th><th>Дата</th><th></th></tr></thead>
+      <tbody id="images"></tbody>
+    </table>
+    <div class="empty" id="noImages">Образов пока нет. Создайте образ, выберите его у компьютера в разделе «ПК» и нажмите «Клонировать».</div>
+    <form id="imageForm">
+      <input id="newImage" placeholder="win11-club" aria-label="Имя образа" maxlength="64" required>
+      <button type="submit">Создать образ</button>
+    </form>
+  </section>
+  </div>
+
+  <div class="page" id="page-settings" hidden>
+  <h1>Настройки</h1>
+  <section>
+    <div class="head"><h2>Хранилище</h2></div>
+    <form class="field" id="settingsForm" style="display:block;padding:14px 18px">
+      <label for="imageDir">Папка образов</label>
+      <div class="row">
+        <input id="imageDir" placeholder="D:\fogs-images" required>
+        <button type="submit">Сохранить</button>
+      </div>
+      <p id="imageDirNote">Здесь сервер создаёт новые образы. Если папки нет, она будет создана. Созданные раньше образы остаются на своих местах.</p>
+    </form>
+    <div class="field">
+      <label for="exitMode">Загрузка с диска, когда задачи нет</label>
+      <select id="exitMode">
+        <option value="sanboot">sanboot: iPXE сам находит загрузчик Windows (рекомендуется)</option>
+        <option value="exit">exit: вернуть управление прошивке</option>
+        <option value="refind">rEFInd: файл refind.efi в каталоге загрузки</option>
+      </select>
+      <p id="exitNote">Если компьютер после сети выпадает в настройки UEFI, попробуйте другой способ.</p>
+    </div>
+    <div class="field">
+      <label>Каталог загрузки</label>
+      <div class="value" id="rootDir"></div>
+      <p>Задаётся при запуске флагом -root. Файлы отсюда доступны всем в сети без пароля, поэтому образы здесь хранить нельзя.</p>
+    </div>
+  </section>
+  </div>
 </main>
+</div>
+
+<dialog id="hostDialog" aria-labelledby="hostDialogTitle">
+  <form id="hostForm" method="dialog">
+    <h2 id="hostDialogTitle"></h2>
+    <div class="alert" id="hostError" role="alert" hidden></div>
+    <div class="field">
+      <label for="hostMac">MAC-адрес</label>
+      <input id="hostMac" placeholder="04:7c:16:e7:d2:1e" required>
+    </div>
+    <div class="field">
+      <label for="hostName">Имя</label>
+      <input id="hostName" placeholder="PC-01" maxlength="64" required>
+    </div>
+    <div class="field">
+      <label for="hostImage">Образ</label>
+      <select id="hostImage"></select>
+      <p>Можно оставить пустым. Клонировать и разворачивать такой ПК нельзя, пока образ не выбран.</p>
+    </div>
+    <div class="buttons">
+      <button type="button" id="hostCancel">Отмена</button>
+      <button type="submit" class="main" id="hostSave"></button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 const $ = id => document.getElementById(id);
-const statusText = { queued: 'Ждёт загрузки ПК', started: 'Запущен агент' };
+const statusText = { queued: 'Ждёт загрузки ПК', started: 'Загружается WinPE' };
+
+function formatSize(n) {
+  if (n >= 2 ** 30) return (n / 2 ** 30).toFixed(1) + ' ГБ';
+  return Math.max(1, Math.round(n / 2 ** 20)) + ' МБ';
+}
+
+const kindText = { agent: 'Проверка связи', clone: 'Клонирование', deploy: 'Развёртывание' };
+const stateText = { queued: 'Ждёт загрузки ПК', started: 'Загружается WinPE', running: 'Выполняется', done: 'Готово', failed: 'Ошибка', cancelled: 'Отменена' };
+const stuck = t => !t.finishedAt && t.stage === 'Ошибка'; // the agent waits on its error screen
+
+function statusChip(t) {
+  if (!t) return '—';
+  if (stuck(t)) return el('span', { className: 'chip failed', textContent: 'Ошибка, ждёт на ПК' });
+  if (!t.finishedAt && t.stage === 'Ожидание') return el('span', { className: 'chip queued', textContent: 'Ждёт образ' });
+  return el('span', { className: 'chip ' + t.status, textContent: stateText[t.status] || t.status });
+}
+
+function progress(t) {
+  if (!t || t.finishedAt || t.status !== 'running') return '—';
+  const bar = el('span', { className: stuck(t) ? 'bar failed' : 'bar' }, el('span'));
+  bar.firstChild.style.width = t.percent + '%';
+  return el('span', {}, bar, t.percent + '%');
+}
+
+function messageCell(t) {
+  const text = t ? t.message : '';
+  return el('td', { className: t && (t.status === 'failed' || stuck(t)) ? 'message hide-sm lost' : 'message hide-sm', textContent: text || '—', title: text || '' });
+}
 
 function el(tag, props, ...children) {
   const node = Object.assign(document.createElement(tag), props);
@@ -122,6 +304,8 @@ async function act(method, path, body) {
   try {
     await api(method, path, body);
     showError('');
+    // The table is not redrawn under a focused field, so release it after Enter.
+    if (document.activeElement && ['INPUT', 'SELECT'].includes(document.activeElement.tagName)) document.activeElement.blur();
     await refresh();
     return true;
   } catch (e) {
@@ -134,42 +318,289 @@ function button(text, className, onclick) {
   return el('button', { type: 'button', textContent: text, className, onclick });
 }
 
-function hostRow(h) {
-  const name = button(h.name, 'name', () => {
-    const next = prompt('Имя компьютера', h.name);
-    if (next !== null) act('PATCH', '/api/hosts/' + h.id, { name: next });
-  });
-  name.title = 'Переименовать';
+// openMenu shows a list of actions next to a button. It lives outside the table,
+// so the regular refresh does not close it and the table does not clip it.
+let closeMenu = () => {};
+function openMenu(anchor, items) {
+  closeMenu();
+  const menu = el('div', { className: 'menu' });
+  menu.setAttribute('role', 'menu');
+  for (const item of items) {
+    if (!item) {
+      menu.append(el('hr'));
+      continue;
+    }
+    const entry = button(item.text, item.danger ? 'danger' : '', () => {
+      // What cannot be undone asks a second time, naming what it will do.
+      if (item.confirm && !entry.dataset.armed) {
+        entry.dataset.armed = '1';
+        entry.textContent = item.confirm;
+        entry.className = 'danger';
+        return;
+      }
+      closeMenu();
+      item.run();
+    });
+    entry.setAttribute('role', 'menuitem');
+    entry.disabled = !!item.why;
+    if (item.why) entry.append(el('small', { textContent: item.why }));
+    menu.append(entry);
+  }
+  document.body.append(menu);
+  const box = anchor.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(box.right, innerWidth - 8) - menu.offsetWidth) + 'px';
+  const below = box.bottom + 4 + menu.offsetHeight <= innerHeight;
+  menu.style.top = (below ? box.bottom + 4 : Math.max(8, box.top - 4 - menu.offsetHeight)) + 'px';
 
-  const chip = el('span', {
-    className: 'chip ' + (h.task ? h.task.status : ''),
-    textContent: h.task ? statusText[h.task.status] || h.task.status : 'Нет',
-  });
-  const task = h.task
-    ? button('Отменить', '', () => act('DELETE', `/api/hosts/${h.id}/task`))
-    : button('Запустить агента', 'main', () => act('POST', `/api/hosts/${h.id}/task`));
-  const remove = button('Удалить', 'quiet', () => {
-    if (confirm(`Удалить ${h.name}? Сервер перестанет ему отвечать.`)) act('DELETE', '/api/hosts/' + h.id);
-  });
-
-  return el('tr', {},
-    el('td', {}, name),
-    el('td', { className: 'mac', textContent: h.mac }),
-    el('td', { className: 'when hide-sm', textContent: ago(h.lastSeen) }),
-    el('td', {}, chip),
-    el('td', { className: 'actions' }, task, ' ', remove));
+  const entries = () => [...menu.querySelectorAll('button:not(:disabled)')];
+  const outside = e => { if (!menu.contains(e.target)) closeMenu(); };
+  const keys = e => {
+    const list = entries();
+    const at = list.indexOf(document.activeElement);
+    if (e.key === 'Escape') { closeMenu(); anchor.focus(); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); list[(at + 1) % list.length]?.focus(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); list[(at - 1 + list.length) % list.length]?.focus(); }
+  };
+  closeMenu = () => {
+    menu.remove();
+    document.removeEventListener('mousedown', outside);
+    document.removeEventListener('keydown', keys);
+    window.removeEventListener('scroll', closeMenu, true);
+    closeMenu = () => {};
+  };
+  document.addEventListener('mousedown', outside);
+  document.addEventListener('keydown', keys);
+  window.addEventListener('scroll', closeMenu, true);
+  entries()[0]?.focus();
 }
 
-function foundRow(d, index) {
-  const add = button('Добавить', 'main', () => {
-    const name = prompt('Имя компьютера', 'PC-' + String(index + 1).padStart(2, '0'));
-    if (name !== null) act('POST', '/api/hosts', { mac: d.mac, name });
+// hostActions lists what can be done with a PC. Clone and deploy need an image;
+// the server refuses them too, this only says so before the click.
+function hostActions(h) {
+  const post = kind => act('POST', `/api/hosts/${h.id}/task`, { kind });
+  const image = lastImages.find(i => i.name === h.image);
+  const noImage = image ? '' : 'сначала выберите образ';
+  const hasVersions = image && image.versions.some(v => !v.disabled);
+  const edit = { text: 'Изменить', run: () => openHostDialog({ host: h }) };
+  const remove = { text: 'Удалить', danger: true, confirm: `Точно удалить ${h.name}?`, run: () => act('DELETE', '/api/hosts/' + h.id) };
+  if (h.task) {
+    return [{ text: 'Отменить задачу', run: () => act('DELETE', `/api/hosts/${h.id}/task`) }, null, edit, remove];
+  }
+  return [
+    { text: 'Клонировать', why: noImage, run: () => post('clone') },
+    {
+      text: 'Развернуть', why: noImage || (hasVersions ? '' : 'в образе ещё нет версий'),
+      confirm: `Стереть диск ${h.name}?`, run: () => post('deploy'),
+    },
+    { text: 'Проверить связь', run: () => post('agent') },
+    null, edit, remove,
+  ];
+}
+
+function hostRow(h) {
+  const t = h.task || h.lastTask;
+  const menu = button('Действия ▾', '', () => openMenu(menu, hostActions(h)));
+  menu.setAttribute('aria-haspopup', 'menu');
+  const name = el('td', { title: h.image ? '' : 'Образ не выбран' },
+    ...(h.image ? [] : [el('span', { className: 'nodot' })]), el('span', { className: 'name', textContent: h.name }));
+  if (h.shrunk && !h.task) name.append(el('div', { className: 'sub lost', textContent: 'Том сжат: запустите «Проверить связь»' }));
+  return el('tr', {},
+    name,
+    el('td', { className: 'mac', textContent: h.mac }),
+    el('td', { className: h.image ? '' : 'lost', textContent: h.image || 'не выбран' }),
+    el('td', { className: 'when hide-sm', textContent: ago(h.lastSeen) }),
+    el('td', { textContent: t ? kindText[t.kind] || t.kind : '—' }),
+    el('td', {}, statusChip(t)),
+    el('td', { className: 'hide-sm', textContent: (h.task && h.task.stage) || '—' }),
+    el('td', {}, progress(h.task)),
+    messageCell(t),
+    el('td', { className: 'when hide-sm', textContent: t && t.finishedAt ? ago(t.finishedAt) : '—' }),
+    el('td', { className: 'actions' }, menu));
+}
+
+// The dialog adds a PC, with the fields filled in if it was found on the network,
+// or changes one. An image is optional in both cases.
+let editedHost = null;
+function openHostDialog({ host = null, mac = '', name = '' }) {
+  editedHost = host;
+  $('hostDialogTitle').textContent = host ? 'Изменить ' + host.name : 'Новый компьютер';
+  $('hostSave').textContent = host ? 'Сохранить' : 'Добавить';
+  $('hostMac').value = host ? host.mac : mac;
+  $('hostMac').readOnly = !!host;
+  $('hostName').value = host ? host.name : name;
+  $('hostImage').replaceChildren(el('option', { value: '', textContent: '— не выбран' }),
+    ...lastImages.map(i => el('option', { value: i.name, textContent: i.name })));
+  $('hostImage').value = host ? host.image : '';
+  // A running task uses the image of its PC.
+  $('hostImage').disabled = !!(host && host.task);
+  $('hostError').hidden = true;
+  $('hostDialog').showModal();
+  (host || mac ? $('hostName') : $('hostMac')).focus();
+}
+
+$('addHost').addEventListener('click', () => openHostDialog({}));
+$('hostCancel').addEventListener('click', () => $('hostDialog').close());
+$('hostForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const name = $('hostName').value, image = $('hostImage').value;
+  try {
+    if (!editedHost) {
+      await api('POST', '/api/hosts', { mac: $('hostMac').value, name, image });
+    } else {
+      if (name !== editedHost.name) await api('PATCH', '/api/hosts/' + editedHost.id, { name });
+      if (image !== editedHost.image) await api('PUT', `/api/hosts/${editedHost.id}/image`, { image });
+    }
+    $('hostDialog').close();
+    showError('');
+    await refresh();
+  } catch (err) {
+    $('hostError').textContent = err.message;
+    $('hostError').hidden = false;
+  }
+});
+
+function activeRow(t) {
+  return el('tr', {},
+    el('td', { className: 'name', textContent: t.host }),
+    el('td', { textContent: kindText[t.kind] || t.kind }),
+    el('td', { textContent: t.image || '—' }),
+    el('td', {}, statusChip(t)),
+    el('td', { className: 'hide-sm', textContent: t.stage || '—' }),
+    el('td', {}, progress(t)),
+    messageCell(t),
+    el('td', { className: 'when hide-sm', textContent: ago(t.createdAt) }),
+    el('td', { className: 'actions' }, button('Отменить', '', () => act('DELETE', `/api/hosts/${t.hostId}/task`))));
+}
+
+function doneRow(t) {
+  const message = messageCell(t);
+  message.classList.remove('hide-sm');
+  return el('tr', {},
+    el('td', { className: 'name', textContent: t.host }),
+    el('td', { textContent: kindText[t.kind] || t.kind }),
+    el('td', { textContent: t.image || '—' }),
+    el('td', {}, statusChip(t)),
+    message,
+    el('td', { className: 'when hide-sm', textContent: ago(t.createdAt) }),
+    el('td', { className: 'when', textContent: ago(t.finishedAt) }));
+}
+
+// A click on a column header makes that column stand out. It is a rule and not a
+// class on the cells, so it survives the regular redraw of the rows.
+const hotColumns = {};
+function drawHotColumns() {
+  $('hotColumns').textContent = Object.entries(hotColumns).map(([table, n]) => {
+    const cell = `#${table} tbody td:nth-child(${n})`;
+    return `${cell} { background: rgba(93, 202, 165, .09); } ${cell}, ${cell} *:not(.chip) { color: #fff; }`;
+  }).join('\n');
+}
+document.querySelectorAll('table.cols').forEach(table => {
+  table.querySelectorAll('th').forEach((th, i) => {
+    if (!th.textContent) return;
+    th.tabIndex = 0;
+    th.title = 'Нажмите, чтобы выделить столбец';
+    th.setAttribute('aria-pressed', 'false');
+    const toggle = () => {
+      const on = hotColumns[table.id] !== i + 1;
+      table.querySelectorAll('th').forEach(other => { if (other.tabIndex === 0) other.setAttribute('aria-pressed', 'false'); });
+      if (on) hotColumns[table.id] = i + 1;
+      else delete hotColumns[table.id];
+      th.setAttribute('aria-pressed', on);
+      drawHotColumns();
+    };
+    th.onclick = toggle;
+    th.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } };
   });
-  const hide = button('Скрыть', 'quiet', () => act('DELETE', '/api/discovered/' + d.mac));
+});
+
+$('onlyErrors').addEventListener('click', e => {
+  const on = e.target.getAttribute('aria-pressed') !== 'true';
+  e.target.setAttribute('aria-pressed', on);
+  e.target.className = on ? 'danger' : '';
+  refresh();
+});
+
+// imageActions lists what can be done with an image. Everything stays in the list,
+// with the reason if it cannot be done now, so the operator sees it exists.
+function imageActions(image) {
+  const path = `/api/images/${image.name}`;
+  const active = image.versions.filter(v => !v.disabled);
+  const off = image.versions.filter(v => v.disabled);
+  const current = active[active.length - 1];
+  const locked = image.merging ? 'идёт слияние' : image.busy ? 'образ используется задачей' : '';
+  const older = active.filter(v => v !== current);
+  const leaves = image.versions.filter(v => !image.versions.some(o => o.parent === v.number));
+  const items = [];
+  if (older.length) {
+    for (const v of older) {
+      items.push({ text: 'Откатить к ' + v.file, why: locked, confirm: `Деплой пойдёт с ${v.file}. Откатить?`, run: () => act('POST', `${path}/versions/${v.number}/restore`) });
+    }
+  } else {
+    items.push({ text: 'Откатить', why: 'нет более старых версий' });
+  }
+  for (const v of off) {
+    items.push({ text: 'Вернуть ' + v.file, why: locked, run: () => act('POST', `${path}/versions/${v.number}/enable`) });
+  }
+  items.push({
+    text: 'Слить версии', why: locked || (active.length > 1 ? '' : 'в цепочке одна версия'),
+    confirm: off.length ? `Откат пропадёт, отключённых: ${off.length}. Слить?` : 'Откат назад пропадёт. Слить?',
+    run: () => act('POST', path + '/merge'),
+  }, null);
+  for (const v of leaves) {
+    items.push({ text: 'Удалить ' + v.file, danger: true, why: locked, confirm: `Точно удалить ${v.file}?`, run: () => act('DELETE', `${path}/versions/${v.number}`) });
+  }
+  if (!image.versions.length) {
+    items.push({ text: 'Удалить образ', danger: true, why: locked, confirm: `Точно удалить ${image.name}?`, run: () => act('DELETE', path) });
+  }
+  return items;
+}
+
+// imageRows shows every version; what belongs to the image appears once.
+function imageRows(images) {
+  const hostName = mac => (lastHosts.find(h => h.mac === mac) || {}).name || mac;
+  return images.flatMap(image => {
+    const users = lastHosts.filter(h => h.image === image.name).length;
+    const title = el('td', { textContent: image.name, title: image.path, className: image.missing || image.offline ? 'lost' : '' });
+    if (image.missing) title.append(el('div', { className: 'sub lost', textContent: 'Файлы не найдены' }));
+    if (image.offline) title.append(el('div', { className: 'sub lost', textContent: 'Папка недоступна' }));
+    if (image.merging) title.append(el('div', { className: 'chip started', textContent: 'Идёт слияние' }));
+    if (image.mergeError) title.append(el('div', { className: 'sub lost', textContent: 'Слияние не удалось: ' + image.mergeError }));
+    const menu = button('Действия ▾', '', () => openMenu(menu, imageActions(image)));
+    menu.setAttribute('aria-haspopup', 'menu');
+    const first = [title,
+      el('td', { textContent: users }),
+      el('td', {}, image.busy ? el('span', { className: 'chip started', textContent: 'Да' }) : 'Нет')];
+    const actions = el('td', { className: 'actions' }, menu);
+    if (!image.versions.length) {
+      return [el('tr', {}, ...first,
+        el('td', { className: 'when', colSpan: 4, textContent: 'версий пока нет, клонируйте эталон' }), actions)];
+    }
+    const active = image.versions.filter(v => !v.disabled);
+    const current = active[active.length - 1];
+    return image.versions.map((v, i) => {
+      const label = v.missing ? v.file + ' · файл не найден' : v.disabled ? v.file + ' · отключена' : v === current ? v.file + ' · текущая' : v.file;
+      return el('tr', {},
+        ...(i === 0 ? first : [el('td'), el('td'), el('td')]),
+        el('td', { className: v.missing ? 'mac lost' : 'mac', textContent: label, style: v.disabled ? 'opacity: .55' : '' }),
+        el('td', { textContent: formatSize(v.size) }),
+        el('td', { className: 'when hide-sm', textContent: hostName(v.sourceMac) }),
+        el('td', { className: 'when', textContent: new Date(v.createdAt).toLocaleString('ru-RU') }),
+        i === 0 ? actions : el('td', { className: 'actions' }));
+    });
+  });
+}
+
+let lastHosts = [];
+let lastImages = [];
+
+function foundRow(d, index) {
+  const name = 'PC-' + String(index + 1).padStart(2, '0');
   return el('tr', {},
     el('td', { className: 'mac', textContent: d.mac }),
-    el('td', { className: 'when', textContent: ago(d.lastSeen) }),
-    el('td', { className: 'actions' }, add, ' ', hide));
+    el('td', { className: 'when hide-sm', textContent: ago(d.lastSeen) }),
+    el('td', { className: 'actions' },
+      button('Добавить', 'main', () => openHostDialog({ mac: d.mac, name })), ' ',
+      button('Скрыть', 'quiet', () => act('DELETE', '/api/discovered/' + d.mac))));
 }
 
 function fill(list, tbody, table, empty, count, row) {
@@ -182,9 +613,29 @@ function fill(list, tbody, table, empty, count, row) {
 async function refresh() {
   try {
     const s = await api('GET', '/api/state');
+    lastImages = s.images;
     fill(s.hosts, $('hosts'), $('hostTable'), $('noHosts'), $('hostCount'), hostRow);
     fill(s.discovered, $('found'), $('foundTable'), $('noFound'), $('foundCount'),
       (d, i) => foundRow(d, s.hosts.length + i));
+    lastHosts = s.hosts;
+    const active = s.tasks.filter(t => !t.finishedAt);
+    const errorsOnly = $('onlyErrors').getAttribute('aria-pressed') === 'true';
+    const finished = s.tasks.filter(t => t.finishedAt && (!errorsOnly || t.status === 'failed'));
+    fill(active, $('active'), $('activeTable'), $('noActive'), $('activeCount'), activeRow);
+    fill(finished, $('done'), $('doneTable'), $('noDone'), $('doneCount'), doneRow);
+    $('taskBadge').textContent = active.length;
+    $('taskBadge').hidden = !active.length;
+    $('taskBadge').classList.toggle('danger', active.some(stuck));
+    $('images').replaceChildren(...imageRows(s.images));
+    $('imageTable').style.display = s.images.length ? '' : 'none';
+    $('noImages').style.display = s.images.length ? 'none' : '';
+    $('imageCount').textContent = s.images.length || '';
+    const lost = s.images.filter(i => i.missing).length;
+    $('imageBadge').textContent = s.storageOffline ? '!' : lost;
+    $('imageBadge').hidden = !lost && !s.storageOffline;
+    $('storage').hidden = !s.storageOffline;
+    $('foundBadge').textContent = s.discovered.length;
+    $('foundBadge').hidden = !s.discovered.length;
     $('dot').classList.remove('off');
     $('link').textContent = 'на связи';
   } catch (e) {
@@ -193,11 +644,62 @@ async function refresh() {
   }
 }
 
-$('addForm').addEventListener('submit', async e => {
-  e.preventDefault();
-  if (await act('POST', '/api/hosts', { mac: $('newMac').value, name: $('newName').value })) e.target.reset();
+async function loadSettings() {
+  try {
+    const s = await api('GET', '/api/settings');
+    $('imageDir').value = s.imageDir;
+    $('exitMode').value = s.exitMode;
+    $('rootDir').textContent = s.root;
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+$('exitMode').addEventListener('change', async e => {
+  try {
+    await api('PUT', '/api/settings', { exitMode: e.target.value });
+    showError('');
+    $('exitNote').textContent = 'Сохранено';
+    $('exitNote').className = 'saved';
+  } catch (err) {
+    showError(err.message);
+  }
 });
 
+$('imageForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (await act('POST', '/api/images', { name: $('newImage').value })) e.target.reset();
+});
+
+$('settingsForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const note = $('imageDirNote');
+  try {
+    const s = await api('PUT', '/api/settings', { imageDir: $('imageDir').value });
+    $('imageDir').value = s.imageDir;
+    showError('');
+    note.textContent = 'Сохранено';
+    note.className = 'saved';
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
+function route() {
+  const pages = ['pcs', 'tasks', 'images', 'settings'];
+  const wanted = location.hash.slice(1);
+  const page = pages.includes(wanted) ? wanted : 'pcs';
+  for (const name of pages) $('page-' + name).hidden = name !== page;
+  document.querySelectorAll('.side a').forEach(a => {
+    if (a.dataset.page === page) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+  showError('');
+  if (page === 'settings') loadSettings();
+}
+
+window.addEventListener('hashchange', route);
+route();
 refresh();
 setInterval(refresh, 3000);
 </script>
