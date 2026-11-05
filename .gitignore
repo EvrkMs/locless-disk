@@ -10,3 +10,13 @@
 .DS_Store
 Thumbs.db
 *.log
+
+# Рабочий список MAC
+macs.txt
+# Рабочий список задач
+tasks.txt
+
+# База сервера
+*.db
+*.db-wal
+*.db-shm

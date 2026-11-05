@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FOGs</title>
+<style>
+:root {
+  --bg: #14161a; --panel: #1b1e23; --line: #2f3238;
+  --text: #e9e8e3; --soft: #b4b2a9; --muted: #888780;
+  --teal: #5dcaa5; --purple: #afa9ec; --coral: #f0997b;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 32px 24px 64px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 28px; }
+h1 { font-size: 24px; font-weight: 600; margin: 0; }
+h2 { font-size: 16px; font-weight: 600; margin: 0; }
+.link { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); }
+.dot.off { background: var(--coral); }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; }
+.count { color: var(--muted); font-size: 13px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 12px; font-weight: 500; color: var(--muted); padding: 8px 18px; border-top: 1px solid var(--line); }
+td { padding: 10px 18px; border-top: 1px solid var(--line); vertical-align: middle; }
+.mac { font-family: Consolas, ui-monospace, monospace; font-size: 13px; color: var(--soft); }
+.when { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.actions { text-align: right; white-space: nowrap; }
+.chip { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px; color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
+.chip.queued { color: var(--purple); border-color: var(--purple); }
+.chip.started { color: var(--teal); border-color: var(--teal); }
+button { font: inherit; font-size: 13px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outline-offset: 1px; }
+button.main { background: var(--teal); border-color: var(--teal); color: #10231c; font-weight: 500; }
+button.quiet { border-color: transparent; color: var(--muted); }
+button.quiet:hover { color: var(--coral); }
+.name { background: none; border: 0; padding: 0; color: var(--text); font-size: 15px; font-weight: 500; }
+.name:hover { color: var(--teal); }
+input { font: inherit; font-size: 14px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; min-width: 0; }
+form { display: flex; gap: 8px; flex-wrap: wrap; padding: 14px 18px; border-top: 1px solid var(--line); }
+form input { flex: 1 1 180px; }
+.empty { padding: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+#error { display: none; background: #3a2019; color: var(--coral); border: 1px solid var(--coral); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; }
+#error.show { display: block; }
+@media (max-width: 640px) { .hide-sm { display: none; } th, td { padding-left: 12px; padding-right: 12px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>FOGs</h1>
+    <div class="link"><span class="dot" id="dot"></span><span id="link">подключение…</span></div>
+  </header>
+  <div id="error" role="alert"></div>
+
+  <section>
+    <div class="head"><h2>Компьютеры</h2><span class="count" id="hostCount"></span></div>
+    <table id="hostTable">
+      <thead><tr><th>Имя</th><th>MAC</th><th class="hide-sm">Был в сети</th><th>Задача</th><th></th></tr></thead>
+      <tbody id="hosts"></tbody>
+    </table>
+    <div class="empty" id="noHosts">Компьютеров пока нет. Загрузите ПК по сети, и он появится в обнаруженных, или добавьте его по MAC.</div>
+    <form id="addForm">
+      <input id="newMac" placeholder="04:7c:16:e7:d2:1e" aria-label="MAC-адрес" required>
+      <input id="newName" placeholder="PC-01" aria-label="Имя" maxlength="64" required>
+      <button type="submit">Добавить компьютер</button>
+    </form>
+  </section>
+
+  <section>
+    <div class="head"><h2>Обнаружены в сети</h2><span class="count" id="foundCount"></span></div>
+    <table id="foundTable">
+      <thead><tr><th>MAC</th><th>Был в сети</th><th></th></tr></thead>
+      <tbody id="found"></tbody>
+    </table>
+    <div class="empty" id="noFound">Незарегистрированные ПК, загрузившиеся по сети, появятся здесь. Сервер им не отвечает, пока вы их не добавите.</div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const statusText = { queued: 'Ждёт загрузки ПК', started: 'Запущен агент' };
+
+function el(tag, props, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
+function ago(iso) {
+  if (!iso) return 'ещё не был';
+  const sec = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  if (sec < 60) return 'только что';
+  if (sec < 3600) return Math.floor(sec / 60) + ' мин назад';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' ч назад';
+  return new Date(iso).toLocaleDateString('ru-RU');
+}
+
+function showError(message) {
+  $('error').textContent = message || '';
+  $('error').classList.toggle('show', !!message);
+}
+
+async function api(method, path, body) {
+  const options = { method };
+  if (body) {
+    options.headers = { 'Content-Type': 'application/json' };
+    options.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Сервер вернул ошибку ' + res.status);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+async function act(method, path, body) {
+  try {
+    await api(method, path, body);
+    showError('');
+    await refresh();
+    return true;
+  } catch (e) {
+    showError(e.message);
+    return false;
+  }
+}
+
+function button(text, className, onclick) {
+  return el('button', { type: 'button', textContent: text, className, onclick });
+}
+
+function hostRow(h) {
+  const name = button(h.name, 'name', () => {
+    const next = prompt('Имя компьютера', h.name);
+    if (next !== null) act('PATCH', '/api/hosts/' + h.id, { name: next });
+  });
+  name.title = 'Переименовать';
+
+  const chip = el('span', {
+    className: 'chip ' + (h.task ? h.task.status : ''),
+    textContent: h.task ? statusText[h.task.status] || h.task.status : 'Нет',
+  });
+  const task = h.task
+    ? button('Отменить', '', () => act('DELETE', `/api/hosts/${h.id}/task`))
+    : button('Запустить агента', 'main', () => act('POST', `/api/hosts/${h.id}/task`));
+  const remove = button('Удалить', 'quiet', () => {
+    if (confirm(`Удалить ${h.name}? Сервер перестанет ему отвечать.`)) act('DELETE', '/api/hosts/' + h.id);
+  });
+
+  return el('tr', {},
+    el('td', {}, name),
+    el('td', { className: 'mac', textContent: h.mac }),
+    el('td', { className: 'when hide-sm', textContent: ago(h.lastSeen) }),
+    el('td', {}, chip),
+    el('td', { className: 'actions' }, task, ' ', remove));
+}
+
+function foundRow(d, index) {
+  const add = button('Добавить', 'main', () => {
+    const name = prompt('Имя компьютера', 'PC-' + String(index + 1).padStart(2, '0'));
+    if (name !== null) act('POST', '/api/hosts', { mac: d.mac, name });
+  });
+  const hide = button('Скрыть', 'quiet', () => act('DELETE', '/api/discovered/' + d.mac));
+  return el('tr', {},
+    el('td', { className: 'mac', textContent: d.mac }),
+    el('td', { className: 'when', textContent: ago(d.lastSeen) }),
+    el('td', { className: 'actions' }, add, ' ', hide));
+}
+
+function fill(list, tbody, table, empty, count, row) {
+  tbody.replaceChildren(...list.map(row));
+  table.style.display = list.length ? '' : 'none';
+  empty.style.display = list.length ? 'none' : '';
+  count.textContent = list.length || '';
+}
+
+async function refresh() {
+  try {
+    const s = await api('GET', '/api/state');
+    fill(s.hosts, $('hosts'), $('hostTable'), $('noHosts'), $('hostCount'), hostRow);
+    fill(s.discovered, $('found'), $('foundTable'), $('noFound'), $('foundCount'),
+      (d, i) => foundRow(d, s.hosts.length + i));
+    $('dot').classList.remove('off');
+    $('link').textContent = 'на связи';
+  } catch (e) {
+    $('dot').classList.add('off');
+    $('link').textContent = 'нет связи с сервером';
+  }
+}
+
+$('addForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (await act('POST', '/api/hosts', { mac: $('newMac').value, name: $('newName').value })) e.target.reset();
+});
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
