@@ -1,0 +1,12 @@
+# Сборка и артефакты
+/bin/
+/dist/
+*.exe
+*.fogs
+
+# Локальное окружение
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log

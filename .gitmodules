@@ -1,0 +1,12 @@
+[submodule "reference/fogproject"]
+	path = reference/fogproject
+	url = https://github.com/FOGProject/fogproject.git
+	branch = stable
+[submodule "reference/fos"]
+	path = reference/fos
+	url = https://github.com/FOGProject/fos.git
+	branch = master
+[submodule "reference/partclone"]
+	path = reference/partclone
+	url = https://github.com/Thomas-Tsai/partclone.git
+	branch = master
