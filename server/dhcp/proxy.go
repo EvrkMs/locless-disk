@@ -36,6 +36,7 @@ type Proxy struct {
 	BootFile  string                        // first-stage file served over TFTP
 	ScriptURL func(net.HardwareAddr) string // boot script for a client already in iPXE
 	Allow     func(net.HardwareAddr) bool   // nil refuses everyone
+	Seen      func(net.HardwareAddr)        // called for every UEFI PXE client; may be nil
 	Broadcast netip.AddrPort                // zero value means 255.255.255.255:68
 	Log       *slog.Logger
 }
@@ -74,8 +75,11 @@ func (p *Proxy) reply(req *Packet, msg byte) *Packet {
 		p.Log.Debug("ignoring non-UEFI client", "mac", mac.String())
 		return nil
 	}
+	if p.Seen != nil {
+		p.Seen(mac)
+	}
 	if p.Allow == nil || !p.Allow(mac) {
-		p.Log.Info("PXE client seen, not on the allow list", "mac", mac.String())
+		p.Log.Info("PXE client seen, not registered", "mac", mac.String())
 		return nil
 	}
 

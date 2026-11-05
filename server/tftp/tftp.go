@@ -52,10 +52,11 @@ const (
 
 // Server serves the files under Root.
 type Server struct {
-	Root         *os.Root      // files are confined to this directory
-	Timeout      time.Duration // wait for an ACK; zero means 1s
-	Retries      int           // resends before giving up; zero means 5
-	MaxTransfers int           // concurrent transfers; zero means 64
+	Root         *os.Root          // files are confined to this directory
+	Generated    map[string][]byte // files built by the server; they win over Root
+	Timeout      time.Duration     // wait for an ACK; zero means 1s
+	Retries      int               // resends before giving up; zero means 5
+	MaxTransfers int               // concurrent transfers; zero means 64
 	Log          *slog.Logger
 }
 
@@ -155,10 +156,24 @@ func (s *Server) Serve(ctx context.Context, conn *net.UDPConn) error {
 	}
 }
 
-// open resolves a client path inside Root. Windows boot loaders send
-// backslashes and often a leading separator.
-func (s *Server) open(name string) (*os.File, int64, uint16, error) {
+// source is an open file being sent.
+type source interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// memoryFile is a generated file; there is nothing to close.
+type memoryFile struct{ *bytes.Reader }
+
+func (memoryFile) Close() error { return nil }
+
+// open resolves a client path to a generated file or a file inside Root.
+// Windows boot loaders send backslashes and often a leading separator.
+func (s *Server) open(name string) (source, int64, uint16, error) {
 	name = strings.TrimLeft(strings.ReplaceAll(name, `\`, "/"), "/")
+	if data, ok := s.Generated[name]; ok {
+		return memoryFile{bytes.NewReader(data)}, int64(len(data)), 0, nil
+	}
 	if name == "" || !filepath.IsLocal(filepath.FromSlash(name)) {
 		return nil, 0, errAccess, errors.New("access denied")
 	}

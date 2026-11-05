@@ -194,6 +194,25 @@ func TestLogsReadableMAC(t *testing.T) {
 	}
 }
 
+// TestSeenReportsRefusedClients is how a new PC reaches the operator: it gets no
+// answer, but it must still show up in the panel.
+func TestSeenReportsRefusedClients(t *testing.T) {
+	var seen []string
+	p := testProxy()
+	p.Seen = func(mac net.HardwareAddr) { seen = append(seen, mac.String()) }
+
+	if r := p.Offer(pxeRequest(MsgDiscover, otherMAC)); r != nil {
+		t.Fatal("offer sent to a refused client")
+	}
+	bios := pxeRequest(MsgDiscover, allowedMAC)
+	bios.Options[OptClientArch] = []byte{0, 0}
+	p.Offer(bios)
+
+	if len(seen) != 1 || seen[0] != otherMAC.String() {
+		t.Fatalf("seen: %v", seen)
+	}
+}
+
 func TestAck(t *testing.T) {
 	r := testProxy().Ack(pxeRequest(MsgRequest, allowedMAC))
 	if r == nil {

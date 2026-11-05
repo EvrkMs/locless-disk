@@ -1,0 +1,242 @@
+// Package web is the operator panel: a JSON API and the page that uses it.
+//
+// There is no login yet, so the panel must stay on a loopback address: a task
+// can take over a PC, and club customers share the network with the server.
+package web
+
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"mime"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"fogs/server/store"
+)
+
+//go:embed index.html
+var indexHTML []byte
+
+const maxNameLen = 64
+
+// Store is the part of the database the panel uses.
+type Store interface {
+	Hosts(context.Context) ([]store.Host, error)
+	DiscoveredPCs(context.Context) ([]store.Discovered, error)
+	AddHost(context.Context, net.HardwareAddr, string) (store.Host, error)
+	RenameHost(context.Context, int64, string) error
+	DeleteHost(context.Context, int64) error
+	ForgetDiscovered(context.Context, net.HardwareAddr) error
+	CreateTask(context.Context, int64, string) (store.Task, error)
+	CancelTask(context.Context, int64) error
+}
+
+type server struct {
+	store Store
+	log   *slog.Logger
+}
+
+// New returns the panel handler. addr is the host:port it listens on.
+func New(s Store, addr string, log *slog.Logger) http.Handler {
+	h := &server{store: s, log: log}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(indexHTML)
+	})
+	mux.HandleFunc("GET /api/state", h.state)
+	mux.HandleFunc("POST /api/hosts", h.addHost)
+	mux.HandleFunc("PATCH /api/hosts/{id}", h.renameHost)
+	mux.HandleFunc("DELETE /api/hosts/{id}", h.deleteHost)
+	mux.HandleFunc("POST /api/hosts/{id}/task", h.createTask)
+	mux.HandleFunc("DELETE /api/hosts/{id}/task", h.cancelTask)
+	mux.HandleFunc("DELETE /api/discovered/{mac}", h.forgetDiscovered)
+	return guard(addr, mux)
+}
+
+// guard protects a panel without a login from web pages open in the operator's
+// browser. Host stops DNS rebinding; Origin and the JSON content type stop
+// cross-site requests, because a form cannot send them.
+func guard(addr string, next http.Handler) http.Handler {
+	hosts := map[string]bool{addr: true}
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		hosts[net.JoinHostPort("localhost", port)] = true
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hosts[r.Host] {
+			http.Error(w, "wrong host", http.StatusForbidden)
+			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if u, err := url.Parse(origin); err != nil || !hosts[u.Host] {
+				http.Error(w, "wrong origin", http.StatusForbidden)
+				return
+			}
+		}
+		if r.Method != http.MethodGet && r.ContentLength != 0 {
+			if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct != "application/json" {
+				http.Error(w, "expected JSON", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (h *server) state(w http.ResponseWriter, r *http.Request) {
+	hosts, err := h.store.Hosts(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	discovered, err := h.store.DiscoveredPCs(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts, "discovered": discovered})
+}
+
+func (h *server) addHost(w http.ResponseWriter, r *http.Request) {
+	var in struct{ MAC, Name string }
+	if !readJSON(w, r, &in) {
+		return
+	}
+	mac, err := net.ParseMAC(strings.TrimSpace(in.MAC))
+	if err != nil || len(mac) != 6 {
+		writeError(w, http.StatusBadRequest, "Неверный MAC-адрес")
+		return
+	}
+	name, ok := cleanName(w, in.Name)
+	if !ok {
+		return
+	}
+	host, err := h.store.AddHost(r.Context(), mac, name)
+	if errors.Is(err, store.ErrExists) {
+		writeError(w, http.StatusConflict, "Компьютер с таким MAC уже есть")
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.log.Info("host added", "mac", host.MAC, "name", host.Name)
+	writeJSON(w, http.StatusCreated, host)
+}
+
+func (h *server) renameHost(w http.ResponseWriter, r *http.Request) {
+	id, ok := hostID(w, r)
+	if !ok {
+		return
+	}
+	var in struct{ Name string }
+	if !readJSON(w, r, &in) {
+		return
+	}
+	name, ok := cleanName(w, in.Name)
+	if !ok {
+		return
+	}
+	h.done(w, h.store.RenameHost(r.Context(), id, name))
+}
+
+func (h *server) deleteHost(w http.ResponseWriter, r *http.Request) {
+	if id, ok := hostID(w, r); ok {
+		h.done(w, h.store.DeleteHost(r.Context(), id))
+	}
+}
+
+func (h *server) createTask(w http.ResponseWriter, r *http.Request) {
+	id, ok := hostID(w, r)
+	if !ok {
+		return
+	}
+	task, err := h.store.CreateTask(r.Context(), id, store.TaskAgent)
+	if errors.Is(err, store.ErrTaskExists) {
+		writeError(w, http.StatusConflict, "У компьютера уже есть задача")
+		return
+	}
+	if err != nil {
+		h.done(w, err)
+		return
+	}
+	h.log.Info("task created", "host", id, "kind", task.Kind)
+	writeJSON(w, http.StatusCreated, task)
+}
+
+func (h *server) cancelTask(w http.ResponseWriter, r *http.Request) {
+	if id, ok := hostID(w, r); ok {
+		h.done(w, h.store.CancelTask(r.Context(), id))
+	}
+}
+
+func (h *server) forgetDiscovered(w http.ResponseWriter, r *http.Request) {
+	mac, err := net.ParseMAC(r.PathValue("mac"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Неверный MAC-адрес")
+		return
+	}
+	h.done(w, h.store.ForgetDiscovered(r.Context(), mac))
+}
+
+// done finishes a request that returns no data.
+func (h *server) done(w http.ResponseWriter, err error) {
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "Не найдено")
+	default:
+		h.fail(w, err)
+	}
+}
+
+// fail reports an internal error; the details go to the log, not the page.
+func (h *server) fail(w http.ResponseWriter, err error) {
+	h.log.Error("request failed", "err", err)
+	writeError(w, http.StatusInternalServerError, "Ошибка сервера, подробности в логе")
+}
+
+func hostID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Неверный номер компьютера")
+		return 0, false
+	}
+	return id, true
+}
+
+func cleanName(w http.ResponseWriter, s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || utf8.RuneCountInString(s) > maxNameLen {
+		writeError(w, http.StatusBadRequest, "Имя должно быть от 1 до 64 символов")
+		return "", false
+	}
+	return s, true
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, "Неверный запрос")
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}

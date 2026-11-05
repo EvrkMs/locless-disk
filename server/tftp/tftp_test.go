@@ -20,6 +20,12 @@ import (
 // startServer serves dir on a loopback port and returns the server address.
 func startServer(t *testing.T, dir string) *net.UDPAddr {
 	t.Helper()
+	return startServerWith(t, dir, nil)
+}
+
+// startServerWith also serves the given generated files.
+func startServerWith(t *testing.T, dir string, generated map[string][]byte) *net.UDPAddr {
+	t.Helper()
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
@@ -29,10 +35,11 @@ func startServer(t *testing.T, dir string) *net.UDPAddr {
 		t.Fatalf("ListenUDP: %v", err)
 	}
 	s := &Server{
-		Root:    root,
-		Timeout: 50 * time.Millisecond,
-		Retries: 3,
-		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Root:      root,
+		Generated: generated,
+		Timeout:   50 * time.Millisecond,
+		Retries:   3,
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -340,6 +347,45 @@ func TestPaths(t *testing.T) {
 			c.send(rrq(tc.name))
 			c.wantError(tc.code)
 		})
+	}
+}
+
+func TestGeneratedFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "autoexec.ipxe", 10) // a stale copy on disk must lose
+	want := []byte("#!ipxe\nexit\n")
+	addr := startServerWith(t, dir, map[string][]byte{"autoexec.ipxe": want})
+
+	for _, name := range []string{"autoexec.ipxe", `\autoexec.ipxe`, "/autoexec.ipxe"} {
+		t.Run(name, func(t *testing.T) {
+			c := newClient(t, addr)
+			c.send(rrq(name))
+			if got := c.download(512, 1, nil); !bytes.Equal(got, want) {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestGeneratedFileSize is what the UEFI firmware does for autoexec.ipxe: it
+// asks for the size, aborts, then fetches the file in a second request.
+func TestGeneratedFileSize(t *testing.T) {
+	want := []byte("#!ipxe\nexit\n")
+	addr := startServerWith(t, t.TempDir(), map[string][]byte{"autoexec.ipxe": want})
+
+	c := newClient(t, addr)
+	c.send(rrq("autoexec.ipxe", "tsize", "0"))
+	if got := c.oack()["tsize"]; got != strconv.Itoa(len(want)) {
+		t.Fatalf("tsize: %q", got)
+	}
+	c.send(errorPacket(8, "aborted"))
+
+	c = newClient(t, addr)
+	c.send(rrq("autoexec.ipxe", "blksize", "1468"))
+	c.oack()
+	c.ack(0)
+	if got := c.download(1468, 1, nil); !bytes.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
