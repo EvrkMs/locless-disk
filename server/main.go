@@ -14,11 +14,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"time"
 
 	"fogs/server/boot"
 	"fogs/server/dhcp"
+	"fogs/server/maclist"
 	"fogs/server/tftp"
 )
 
@@ -26,7 +26,7 @@ func main() {
 	var cfg config
 	flag.StringVar(&cfg.ip, "ip", "", "IPv4 address of this server on the client network (required)")
 	flag.StringVar(&cfg.root, "root", "", "directory served over TFTP (required)")
-	flag.StringVar(&cfg.allow, "allow-mac", "", "comma-separated MACs to answer; empty means listen and log only")
+	flag.StringVar(&cfg.macList, "mac-list", "", "file with the MACs to answer, re-read on change; empty means listen and log only")
 	flag.StringVar(&cfg.bootFile, "bootfile", "ipxe.efi", "first-stage boot file, relative to -root")
 	flag.IntVar(&cfg.httpPort, "http-port", 8080, "port of the HTTP server")
 	verbose := flag.Bool("v", false, "log debug messages")
@@ -50,7 +50,7 @@ func main() {
 type config struct {
 	ip       string
 	root     string
-	allow    string
+	macList  string
 	bootFile string
 	httpPort int
 }
@@ -66,23 +66,6 @@ func parseIP(s string) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("-ip must be a specific IPv4 address, got %q", s)
 	}
 	return ip, nil
-}
-
-// parseMACs reads the allow list into a set keyed by canonical MAC.
-func parseMACs(s string) (map[string]bool, error) {
-	set := make(map[string]bool)
-	for _, item := range strings.Split(s, ",") {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		mac, err := net.ParseMAC(item)
-		if err != nil || len(mac) != 6 {
-			return nil, fmt.Errorf("bad MAC %q in -allow-mac", item)
-		}
-		set[mac.String()] = true
-	}
-	return set, nil
 }
 
 // listenUDP binds one service port on the server address.
@@ -104,9 +87,9 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	if cfg.root == "" {
 		return errors.New("-root is required")
 	}
-	allow, err := parseMACs(cfg.allow)
+	macs, err := maclist.Open(cfg.macList, log.With("service", "maclist"))
 	if err != nil {
-		return err
+		return fmt.Errorf("-mac-list: %w", err)
 	}
 	root, err := os.OpenRoot(cfg.root)
 	if err != nil {
@@ -139,19 +122,18 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	}
 	defer httpLn.Close()
 
-	known := func(mac net.HardwareAddr) bool { return allow[mac.String()] }
 	proxy := &dhcp.Proxy{
 		ServerIP: ip,
 		BootFile: cfg.bootFile,
 		ScriptURL: func(mac net.HardwareAddr) string {
 			return fmt.Sprintf("http://%s/boot.ipxe?mac=%s", httpAddr, mac)
 		},
-		Allow: known,
+		Allow: macs.Contains,
 		Log:   log.With("service", "dhcp"),
 	}
 	files := &tftp.Server{Root: root, Log: log.With("service", "tftp")}
 	web := &http.Server{
-		Handler:           boot.New(known, log.With("service", "http")),
+		Handler:           boot.New(macs.Contains, log.With("service", "http")),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -175,10 +157,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	stopWeb := context.AfterFunc(ctx, func() { web.Close() })
 	defer stopWeb()
 
-	if len(allow) == 0 {
-		log.Warn("allow list is empty: listening and logging only, no client will be answered")
+	if macs.Len() == 0 {
+		log.Warn("MAC list is empty: listening and logging only, no client will be answered")
 	}
-	log.Info("server started", "ip", ip, "http", httpAddr, "root", cfg.root, "allowed", len(allow))
+	log.Info("server started", "ip", ip, "http", httpAddr, "root", cfg.root, "macs", macs.Len())
 
 	var first error
 	for range services {
