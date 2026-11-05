@@ -29,10 +29,10 @@ golden-тестами. Сервер и агент ещё не написаны.
 
 ## Сборка и тесты
 
-Тулчейн живёт в WSL-дистрибутиве `claude`, на хосте Windows ничего не ставим:
+Go собирается в WSL, на хосте Windows ничего не ставим:
 
 ```bash
-wsl -d claude -e bash -lc "cd /mnt/g/Wsl-space/FOGs && go vet ./... && go test ./..."
+go vet ./... && go test ./...
 ```
 
 Кросс-компиляция агента под WinPE:
