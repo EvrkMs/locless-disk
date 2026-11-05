@@ -1,0 +1,192 @@
+package boot
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"strconv"
+	"unicode/utf8"
+
+	"fogs/proto"
+	"fogs/server/store"
+)
+
+// maxReportText bounds the text an agent may store. Anyone on the network can
+// reach these endpoints, so what they accept must stay small and harmless.
+const maxReportText = 500
+
+// maxTableBody fits a table of 128 partitions with room to spare.
+const maxTableBody = 64 << 10
+
+// AgentStore is the part of the database the agent endpoints use.
+type AgentStore interface {
+	HostName(context.Context, net.HardwareAddr) (string, error)
+	ActiveTask(context.Context, net.HardwareAddr) (*store.Task, error)
+	TaskOpen(ctx context.Context, id int64) (bool, error)
+	SavedTable(context.Context, net.HardwareAddr) ([]byte, error)
+	SetSavedTable(context.Context, net.HardwareAddr, []byte) error
+	ReportProgress(ctx context.Context, mac net.HardwareAddr, id int64, percent int, stage, message string) error
+	FinishTask(ctx context.Context, mac net.HardwareAddr, id int64, ok bool, message string) error
+}
+
+// addAgentRoutes registers what the agent talks to.
+func addAgentRoutes(mux *http.ServeMux, c Config) {
+	mux.HandleFunc("GET /agent/{mac}/"+proto.AgentConfigName, func(w http.ResponseWriter, r *http.Request) {
+		mac, ok := parseMAC(w, r.PathValue("mac"))
+		if !ok {
+			return
+		}
+		name, err := c.Agent.HostName(r.Context(), mac)
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			internalError(w, c, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, proto.AgentConfig{Server: "http://" + c.HTTPAddr, MAC: mac.String(), Host: name})
+	})
+
+	mux.HandleFunc("GET /agent/task", func(w http.ResponseWriter, r *http.Request) {
+		mac, ok := parseMAC(w, r.URL.Query().Get("mac"))
+		if !ok {
+			return
+		}
+		task, err := c.Agent.ActiveTask(r.Context(), mac)
+		if err != nil {
+			internalError(w, c, err)
+			return
+		}
+		if task == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		table, err := c.Agent.SavedTable(r.Context(), mac)
+		if err != nil {
+			internalError(w, c, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, proto.AgentTask{ID: task.ID, Kind: task.Kind, Image: task.Image, Table: table})
+	})
+
+	// The partition table of a PC, saved before its volume is shrunk and removed,
+	// with an empty body, once the volume is back. It belongs to the PC and not to
+	// a task: a cancelled task does not give the volume back.
+	mux.HandleFunc("POST /agent/table", func(w http.ResponseWriter, r *http.Request) {
+		mac, ok := parseMAC(w, r.URL.Query().Get("mac"))
+		if !ok {
+			return
+		}
+		table, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTableBody))
+		if err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		err = c.Agent.SetSavedTable(r.Context(), mac, table)
+		if errors.Is(err, store.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			internalError(w, c, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	addCloneRoutes(mux, c)
+	addDeployRoutes(mux, c)
+
+	mux.HandleFunc("POST /agent/tasks/{id}/progress", func(w http.ResponseWriter, r *http.Request) {
+		var in proto.AgentProgress
+		id, mac, ok := readReport(w, r, &in, func() string { return in.MAC })
+		if !ok {
+			return
+		}
+		if in.Percent < 0 || in.Percent > 100 {
+			http.Error(w, "bad percent", http.StatusBadRequest)
+			return
+		}
+		if in.Stage == proto.StageFailed {
+			c.Log.Warn("agent reported an error", "mac", mac.String(), "task", id, "message", clip(in.Message), "details", in.Details)
+		}
+		err := c.Agent.ReportProgress(r.Context(), mac, id, in.Percent, clip(in.Stage), clip(in.Message))
+		finishReport(w, c, err)
+	})
+
+	mux.HandleFunc("POST /agent/tasks/{id}/finish", func(w http.ResponseWriter, r *http.Request) {
+		var in proto.AgentResult
+		id, mac, ok := readReport(w, r, &in, func() string { return in.MAC })
+		if !ok {
+			return
+		}
+		err := c.Agent.FinishTask(r.Context(), mac, id, in.OK, clip(in.Message))
+		if err == nil {
+			if c.Clone != nil {
+				c.Clone.Abort(id) // nothing to drop after a successful clone
+			}
+			c.Log.Info("task finished", "mac", mac.String(), "task", id, "ok", in.OK, "message", clip(in.Message))
+		}
+		finishReport(w, c, err)
+	})
+}
+
+// readReport decodes a report and returns the task id and the sender's MAC.
+func readReport(w http.ResponseWriter, r *http.Request, in any, macOf func() string) (int64, net.HardwareAddr, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad task id", http.StatusBadRequest)
+		return 0, nil, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	if err := json.NewDecoder(r.Body).Decode(in); err != nil {
+		http.Error(w, "bad report", http.StatusBadRequest)
+		return 0, nil, false
+	}
+	mac, ok := parseMAC(w, macOf())
+	return id, mac, ok
+}
+
+// finishReport answers a report. 410 tells the agent to stop: the task is gone.
+func finishReport(w http.ResponseWriter, c Config, err error) {
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, store.ErrNotFound):
+		http.Error(w, "no such active task", http.StatusGone)
+	default:
+		internalError(w, c, err)
+	}
+}
+
+func parseMAC(w http.ResponseWriter, s string) (net.HardwareAddr, bool) {
+	mac, err := net.ParseMAC(s)
+	if err != nil || len(mac) != 6 {
+		http.Error(w, "bad mac", http.StatusBadRequest)
+		return nil, false
+	}
+	return mac, true
+}
+
+func internalError(w http.ResponseWriter, c Config, err error) {
+	c.Log.Error("agent request failed", "err", err)
+	http.Error(w, "server error", http.StatusInternalServerError)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
+}
+
+// clip cuts text to maxReportText characters without breaking UTF-8.
+func clip(s string) string {
+	if utf8.RuneCountInString(s) <= maxReportText {
+		return s
+	}
+	return string([]rune(s)[:maxReportText])
+}

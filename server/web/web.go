@@ -26,37 +26,61 @@ var indexHTML []byte
 
 const maxNameLen = 64
 
+// taskHistory is how many tasks the panel shows.
+const taskHistory = 100
+
 // Store is the part of the database the panel uses.
 type Store interface {
 	Hosts(context.Context) ([]store.Host, error)
+	RecentTasks(context.Context, int) ([]store.HostTask, error)
 	DiscoveredPCs(context.Context) ([]store.Discovered, error)
 	AddHost(context.Context, net.HardwareAddr, string) (store.Host, error)
 	RenameHost(context.Context, int64, string) error
 	DeleteHost(context.Context, int64) error
 	ForgetDiscovered(context.Context, net.HardwareAddr) error
-	CreateTask(context.Context, int64, string) (store.Task, error)
+	CreateTask(context.Context, int64, string, string) (store.Task, error)
 	CancelTask(context.Context, int64) error
 	Setting(context.Context, string) (string, error)
 	SetSetting(context.Context, string, string) error
+	Images(context.Context) ([]store.Image, error)
+	CreateImage(context.Context, string, string) error
+	ImagePath(context.Context, string) (string, error)
+	DeleteImage(context.Context, string) error
+	SetHostImage(context.Context, int64, string) error
+	HostImage(context.Context, int64) (string, error)
+	AllVersions(context.Context, string) ([]store.Version, error)
+	DeleteVersion(context.Context, string, int) error
+	ActiveImageTasks(context.Context, string) (int, error)
+	ClearImageLinks(context.Context, string) error
+}
+
+// Images changes the versions of images, which takes more than the database.
+type Images interface {
+	Restore(ctx context.Context, image string, number int) error
+	Enable(ctx context.Context, image string, number int) error
+	StartMerge(ctx context.Context, image string) error
+	Merging(image string) (bool, string)
 }
 
 // Config is what the panel needs from the server.
 type Config struct {
-	Store Store
-	Addr  string // host:port the panel listens on
-	Root  string // directory served to clients without a login
-	Log   *slog.Logger
+	Store  Store
+	Images Images
+	Addr   string // host:port the panel listens on
+	Root   string // directory served to clients without a login
+	Log    *slog.Logger
 }
 
 type server struct {
-	store Store
-	root  string
-	log   *slog.Logger
+	store  Store
+	images Images
+	root   string
+	log    *slog.Logger
 }
 
 // New returns the panel handler.
 func New(c Config) http.Handler {
-	h := &server{store: c.Store, root: c.Root, log: c.Log}
+	h := &server{store: c.Store, images: c.Images, root: c.Root, log: c.Log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -71,6 +95,13 @@ func New(c Config) http.Handler {
 	mux.HandleFunc("DELETE /api/discovered/{mac}", h.forgetDiscovered)
 	mux.HandleFunc("GET /api/settings", h.settings)
 	mux.HandleFunc("PUT /api/settings", h.saveSettings)
+	mux.HandleFunc("POST /api/images", h.createImage)
+	mux.HandleFunc("DELETE /api/images/{name}", h.deleteImage)
+	mux.HandleFunc("DELETE /api/images/{name}/versions/{number}", h.deleteVersion)
+	mux.HandleFunc("POST /api/images/{name}/versions/{number}/restore", h.restoreVersion)
+	mux.HandleFunc("POST /api/images/{name}/versions/{number}/enable", h.enableVersion)
+	mux.HandleFunc("POST /api/images/{name}/merge", h.mergeImage)
+	mux.HandleFunc("PUT /api/hosts/{id}/image", h.setHostImage)
 	return guard(c.Addr, mux)
 }
 
@@ -114,11 +145,26 @@ func (h *server) state(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts, "discovered": discovered})
+	images, err := h.store.Images(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	offline, err := h.auditImages(r.Context(), images, hosts)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	tasks, err := h.store.RecentTasks(r.Context(), taskHistory)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts, "discovered": discovered, "images": images, "tasks": tasks, "storageOffline": offline})
 }
 
 func (h *server) addHost(w http.ResponseWriter, r *http.Request) {
-	var in struct{ MAC, Name string }
+	var in struct{ MAC, Name, Image string }
 	if !readJSON(w, r, &in) {
 		return
 	}
@@ -139,6 +185,14 @@ func (h *server) addHost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.fail(w, err)
 		return
+	}
+	if in.Image != "" {
+		if err := h.store.SetHostImage(r.Context(), host.ID, in.Image); err != nil {
+			h.store.DeleteHost(r.Context(), host.ID)
+			writeError(w, http.StatusConflict, "Такого образа нет")
+			return
+		}
+		host.Image = in.Image
 	}
 	h.log.Info("host added", "mac", host.MAC, "name", host.Name)
 	writeJSON(w, http.StatusCreated, host)
@@ -171,7 +225,31 @@ func (h *server) createTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	task, err := h.store.CreateTask(r.Context(), id, store.TaskAgent)
+	in := struct{ Kind string }{Kind: store.TaskAgent}
+	if r.ContentLength != 0 && !readJSON(w, r, &in) {
+		return
+	}
+	image, err := h.store.HostImage(r.Context(), id)
+	if err != nil {
+		h.done(w, err)
+		return
+	}
+	switch in.Kind {
+	case store.TaskAgent:
+		image = ""
+	case store.TaskClone, store.TaskDeploy:
+		if image == "" {
+			writeError(w, http.StatusConflict, "Сначала выберите образ у компьютера")
+			return
+		}
+		if !h.imageReady(w, r, image, in.Kind == store.TaskDeploy) {
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "Неизвестный тип задачи")
+		return
+	}
+	task, err := h.store.CreateTask(r.Context(), id, in.Kind, image)
 	if errors.Is(err, store.ErrTaskExists) {
 		writeError(w, http.StatusConflict, "У компьютера уже есть задача")
 		return

@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"fogs/recovery"
 )
 
 // Port is the well-known TFTP port.
@@ -52,11 +54,11 @@ const (
 
 // Server serves the files under Root.
 type Server struct {
-	Root         *os.Root          // files are confined to this directory
-	Generated    map[string][]byte // files built by the server; they win over Root
-	Timeout      time.Duration     // wait for an ACK; zero means 1s
-	Retries      int               // resends before giving up; zero means 5
-	MaxTransfers int               // concurrent transfers; zero means 64
+	Root         *os.Root                 // files are confined to this directory
+	Generated    func(name string) []byte // files built by the server, nil if not one; they win over Root
+	Timeout      time.Duration            // wait for an ACK; zero means 1s
+	Retries      int                      // resends before giving up; zero means 5
+	MaxTransfers int                      // concurrent transfers; zero means 64
 	Log          *slog.Logger
 }
 
@@ -151,7 +153,13 @@ func (s *Server) Serve(ctx context.Context, conn *net.UDPConn) error {
 		go func() {
 			defer running.Done()
 			defer func() { <-slots }()
-			s.transfer(ctx, local, src, req)
+			err := recovery.Run(func() error {
+				s.transfer(ctx, local, src, req)
+				return nil
+			})
+			if err != nil {
+				s.Log.Error("transfer crashed", "err", err, "stack", recovery.StackOf(err))
+			}
 		}()
 	}
 }
@@ -171,7 +179,7 @@ func (memoryFile) Close() error { return nil }
 // Windows boot loaders send backslashes and often a leading separator.
 func (s *Server) open(name string) (source, int64, uint16, error) {
 	name = strings.TrimLeft(strings.ReplaceAll(name, `\`, "/"), "/")
-	if data, ok := s.Generated[name]; ok {
+	if data := s.generated(name); data != nil {
 		return memoryFile{bytes.NewReader(data)}, int64(len(data)), 0, nil
 	}
 	if name == "" || !filepath.IsLocal(filepath.FromSlash(name)) {
@@ -392,4 +400,12 @@ func errorPacket(code uint16, msg string) []byte {
 	binary.BigEndian.PutUint16(b[2:], code)
 	b = append(b, msg...)
 	return append(b, 0)
+}
+
+// generated returns a file built by the server, or nil.
+func (s *Server) generated(name string) []byte {
+	if s.Generated == nil {
+		return nil
+	}
+	return s.Generated(name)
 }

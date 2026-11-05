@@ -11,3 +11,7 @@ import (
 func runWindow(func(*image.RGBA), func(int) bool) error {
 	return errors.New("the agent screen needs Windows")
 }
+
+func closeWindow() {}
+
+func openShell() {}

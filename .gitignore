@@ -2,7 +2,8 @@
 /bin/
 /dist/
 *.exe
-*.fogs
+*.ldisk
+*.ldelta
 
 # Локальное окружение
 .idea/
@@ -10,6 +11,8 @@
 .DS_Store
 Thumbs.db
 *.log
+*.log.1
+*.log.crash
 
 # База сервера
 *.db

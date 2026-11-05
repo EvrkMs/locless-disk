@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"fogs/proto"
 	"fogs/server/store"
 )
 
@@ -16,25 +17,47 @@ func (h *server) settings(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"imageDir": dir, "root": h.root})
-}
-
-func (h *server) saveSettings(w http.ResponseWriter, r *http.Request) {
-	var in struct{ ImageDir string }
-	if !readJSON(w, r, &in) {
-		return
-	}
-	dir, err := prepareImageDir(strings.TrimSpace(in.ImageDir), h.root)
+	mode, err := h.store.Setting(r.Context(), store.SettingExitMode)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := h.store.SetSetting(r.Context(), store.SettingImageDir, dir); err != nil {
 		h.fail(w, err)
 		return
 	}
-	h.log.Info("image directory changed", "dir", dir)
-	writeJSON(w, http.StatusOK, map[string]string{"imageDir": dir, "root": h.root})
+	if !proto.ValidExitMode(mode) {
+		mode = proto.ExitSanboot
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"imageDir": dir, "exitMode": mode, "root": h.root})
+}
+
+// saveSettings stores the fields present in the request.
+func (h *server) saveSettings(w http.ResponseWriter, r *http.Request) {
+	var in struct{ ImageDir, ExitMode *string }
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if in.ExitMode != nil {
+		if !proto.ValidExitMode(*in.ExitMode) {
+			writeError(w, http.StatusBadRequest, "Неизвестный способ выхода")
+			return
+		}
+		if err := h.store.SetSetting(r.Context(), store.SettingExitMode, *in.ExitMode); err != nil {
+			h.fail(w, err)
+			return
+		}
+		h.log.Info("exit mode changed", "mode", *in.ExitMode)
+	}
+	if in.ImageDir != nil {
+		dir, err := prepareImageDir(strings.TrimSpace(*in.ImageDir), h.root)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := h.store.SetSetting(r.Context(), store.SettingImageDir, dir); err != nil {
+			h.fail(w, err)
+			return
+		}
+		h.log.Info("image directory changed", "dir", dir)
+	}
+	h.settings(w, r)
 }
 
 // prepareImageDir validates the directory for disk images, creates it if needed

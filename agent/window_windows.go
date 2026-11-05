@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"image"
+	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -30,6 +32,9 @@ var (
 	procSetProcessDPIAware  = user32.NewProc("SetProcessDPIAware")
 	procSetTimer            = user32.NewProc("SetTimer")
 	procShowCursor          = user32.NewProc("ShowCursor")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procGetKeyState         = user32.NewProc("GetKeyState")
+	procPostMessageW        = user32.NewProc("PostMessageW")
 	procSetDIBitsToDevice   = gdi32.NewProc("SetDIBitsToDevice")
 	procGetModuleHandleW    = kernel32.NewProc("GetModuleHandleW")
 )
@@ -40,13 +45,24 @@ const (
 	wsExTopmost = 0x00000008
 
 	wmDestroy    = 0x0002
+	wmClose      = 0x0010
 	wmPaint      = 0x000f
 	wmEraseBkgnd = 0x0014
 	wmKeyDown    = 0x0100
+	wmSysKeyDown = 0x0104
 	wmTimer      = 0x0113
+
+	vkControl = 0x11
+	vkMenu    = 0x12 // Alt
+	vkDelete  = 0x2e
 
 	smCxScreen = 0
 	smCyScreen = 1
+
+	swHide = 0
+	swShow = 5
+
+	createNewConsole = 0x00000010
 
 	frameInterval = 66 // milliseconds, about 15 frames per second
 )
@@ -99,14 +115,34 @@ type bitmapInfoHeader struct {
 	clrImportant  uint32
 }
 
-// screen is the running window. Win32 calls back into a plain function, so it
+// window is the running window. Win32 calls back into a plain function, so it
 // lives in a package variable; there is only ever one.
-var screen struct {
+var window struct {
+	hwnd  atomic.Uintptr
 	paint func(*image.RGBA)
 	key   func(int) bool
 	frame *image.RGBA
 	bgra  []byte
 	info  bitmapInfoHeader
+}
+
+// closeWindow ends runWindow. It is safe from any goroutine.
+func closeWindow() {
+	procPostMessageW.Call(window.hwnd.Load(), wmClose, 0, 0)
+}
+
+// openShell hides the screen and opens a command prompt for diagnostics. The
+// screen comes back when the prompt is closed. It is safe from any goroutine.
+func openShell() {
+	hwnd := window.hwnd.Load()
+	procShowWindow.Call(hwnd, swHide)
+	defer func() {
+		procShowWindow.Call(hwnd, swShow)
+		procSetForegroundWindow.Call(hwnd)
+	}()
+	cmd := exec.Command("cmd.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewConsole}
+	cmd.Run()
 }
 
 // runWindow opens a borderless window over the whole screen and blocks until
@@ -122,16 +158,16 @@ func runWindow(paint func(*image.RGBA), key func(int) bool) error {
 		return fmt.Errorf("no screen: %dx%d", width, height)
 	}
 
-	screen.paint, screen.key = paint, key
-	screen.frame = image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
-	screen.bgra = make([]byte, len(screen.frame.Pix))
-	screen.info = bitmapInfoHeader{
+	window.paint, window.key = paint, key
+	window.frame = image.NewRGBA(image.Rect(0, 0, int(width), int(height)))
+	window.bgra = make([]byte, len(window.frame.Pix))
+	window.info = bitmapInfoHeader{
 		width:    int32(width),
 		height:   -int32(height), // negative: rows go top to bottom, like image.RGBA
 		planes:   1,
 		bitCount: 32,
 	}
-	screen.info.size = uint32(unsafe.Sizeof(screen.info))
+	window.info.size = uint32(unsafe.Sizeof(window.info))
 
 	instance, _, _ := procGetModuleHandleW.Call(0)
 	name, err := syscall.UTF16PtrFromString("FOGsAgent")
@@ -154,6 +190,7 @@ func runWindow(paint func(*image.RGBA), key func(int) bool) error {
 	if hwnd == 0 {
 		return fmt.Errorf("CreateWindowEx: %w", err)
 	}
+	window.hwnd.Store(hwnd)
 	procSetForegroundWindow.Call(hwnd)
 	procShowCursor.Call(0)
 	if r, _, err := procSetTimer.Call(hwnd, 1, frameInterval, 0); r == 0 {
@@ -173,11 +210,17 @@ func runWindow(paint func(*image.RGBA), key func(int) bool) error {
 	}
 }
 
+// keyHeld reports whether a key is down right now: GetKeyState sets the high bit.
+func keyHeld(vk uintptr) bool {
+	r, _, _ := procGetKeyState.Call(vk)
+	return int16(r) < 0
+}
+
 // windowProc handles the few messages the screen cares about.
 func windowProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case wmTimer:
-		screen.paint(screen.frame)
+		window.paint(window.frame)
 		hdc, _, _ := procGetDC.Call(hwnd)
 		present(hdc)
 		procReleaseDC.Call(hwnd, hdc)
@@ -190,8 +233,12 @@ func windowProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		return 0
 	case wmEraseBkgnd:
 		return 1 // every frame covers the whole window
-	case wmKeyDown:
-		if screen.key(int(wParam)) {
+	case wmKeyDown, wmSysKeyDown: // keys pressed with Alt arrive as system keys
+		code := int(wParam)
+		if code == vkDelete && keyHeld(vkControl) && keyHeld(vkMenu) {
+			code = keyCtrlAltDel
+		}
+		if window.key(code) {
 			procDestroyWindow.Call(hwnd)
 		}
 		return 0
@@ -205,13 +252,13 @@ func windowProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 // present copies the current frame to the window. GDI wants blue first.
 func present(hdc uintptr) {
-	src, dst := screen.frame.Pix, screen.bgra
+	src, dst := window.frame.Pix, window.bgra
 	for i := 0; i+3 < len(src); i += 4 {
 		dst[i], dst[i+1], dst[i+2], dst[i+3] = src[i+2], src[i+1], src[i], 0xff
 	}
-	b := screen.frame.Bounds()
+	b := window.frame.Bounds()
 	procSetDIBitsToDevice.Call(
 		hdc, 0, 0, uintptr(b.Dx()), uintptr(b.Dy()), 0, 0, 0, uintptr(b.Dy()),
-		uintptr(unsafe.Pointer(&dst[0])), uintptr(unsafe.Pointer(&screen.info)), 0,
+		uintptr(unsafe.Pointer(&dst[0])), uintptr(unsafe.Pointer(&window.info)), 0,
 	)
 }

@@ -3,11 +3,10 @@ package proto
 import (
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"math/bits"
 )
 
-// Bitmap marks which clusters of the source volume are stored in the image.
+// Bitmap marks which clusters of a volume the file system uses.
 // Bit i (byte i/8, bit i%8) corresponds to cluster i. Padding bits past the
 // last cluster are always zero.
 type Bitmap struct {
@@ -57,10 +56,7 @@ func (b Bitmap) Blocks() uint64 { return b.blocks }
 // Bytes returns the encoded bitmap. The slice is shared with b.
 func (b Bitmap) Bytes() []byte { return b.data }
 
-// CRC32 returns the checksum stored in Header.BitmapCRC32.
-func (b Bitmap) CRC32() uint32 { return crc32.ChecksumIEEE(b.data) }
-
-// Has reports whether cluster i is marked as stored.
+// Has reports whether cluster i is in use.
 func (b Bitmap) Has(i uint64) bool {
 	if i >= b.blocks {
 		return false
@@ -68,7 +64,7 @@ func (b Bitmap) Has(i uint64) bool {
 	return b.data[i/8]&(1<<(i%8)) != 0
 }
 
-// Set marks cluster i as stored. It panics on an out-of-range index, which is
+// Set marks cluster i as in use. It panics on an out-of-range index, which is
 // a programming error rather than bad input.
 func (b Bitmap) Set(i uint64) {
 	if i >= b.blocks {
@@ -77,7 +73,7 @@ func (b Bitmap) Set(i uint64) {
 	b.data[i/8] |= 1 << (i % 8)
 }
 
-// Count returns the number of clusters marked as stored.
+// Count returns the number of clusters in use.
 func (b Bitmap) Count() uint64 {
 	var n uint64
 	for _, v := range b.data {
@@ -85,3 +81,6 @@ func (b Bitmap) Count() uint64 {
 	}
 	return n
 }
+
+// maxInt is the largest value an int can hold on this platform.
+const maxInt = int(^uint(0) >> 1)
