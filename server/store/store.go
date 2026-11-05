@@ -58,7 +58,15 @@ var migrations = []string{`
 		finished_at INTEGER
 	);
 	CREATE UNIQUE INDEX one_active_task ON tasks(host_id) WHERE finished_at IS NULL;
+`, `
+	CREATE TABLE settings (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
 `}
+
+// SettingImageDir is the directory disk images are stored in.
+const SettingImageDir = "image_dir"
 
 // Store is an open database.
 type Store struct {
@@ -140,6 +148,24 @@ func (s *Store) migrate(ctx context.Context) error {
 func unix(t time.Time) int64 { return t.Unix() }
 
 func fromUnix(v int64) time.Time { return time.Unix(v, 0).UTC() }
+
+// Setting returns a stored value, or "" if it was never set.
+func (s *Store) Setting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, "SELECT value FROM settings WHERE key = ?", key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return value, err
+}
+
+// SetSetting stores a value.
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO settings(key, value) VALUES(?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
 
 // AddHost registers a PC and removes it from the discovered list.
 func (s *Store) AddHost(ctx context.Context, mac net.HardwareAddr, name string) (Host, error) {

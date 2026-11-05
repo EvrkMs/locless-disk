@@ -12,9 +12,24 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
-main { max-width: 1040px; margin: 0 auto; padding: 32px 24px 64px; }
-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 28px; }
-h1 { font-size: 24px; font-weight: 600; margin: 0; }
+.app { display: flex; min-height: 100vh; }
+.side { flex: 0 0 200px; border-right: 1px solid var(--line); padding: 28px 12px; display: flex; flex-direction: column; gap: 4px; }
+.brand { font-size: 20px; font-weight: 600; padding: 0 12px 20px; }
+.side a { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; color: var(--soft); text-decoration: none; }
+.side a:hover { background: var(--panel); color: var(--text); }
+.side a[aria-current="page"] { background: var(--panel); color: var(--text); font-weight: 500; box-shadow: inset 2px 0 0 var(--teal); }
+.side .badge { font-size: 12px; color: #10231c; background: var(--teal); border-radius: 999px; padding: 0 7px; font-weight: 500; }
+.link { margin-top: auto; padding: 12px 12px 0; }
+main { flex: 1; min-width: 0; max-width: 1040px; padding: 32px 28px 64px; }
+h1 { font-size: 22px; font-weight: 600; margin: 0 0 22px; }
+.page[hidden] { display: none; }
+.field { padding: 14px 18px; border-top: 1px solid var(--line); }
+.field label { display: block; font-size: 13px; color: var(--soft); margin-bottom: 6px; }
+.field .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.field .row input { flex: 1 1 260px; }
+.field p { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.field .value { font-family: Consolas, ui-monospace, monospace; font-size: 13px; color: var(--text); }
+.saved { color: var(--teal); }
 h2 { font-size: 16px; font-weight: 600; margin: 0; }
 .link { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); }
@@ -37,6 +52,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outl
 button.main { background: var(--teal); border-color: var(--teal); color: #10231c; font-weight: 500; }
 button.quiet { border-color: transparent; color: var(--muted); }
 button.quiet:hover { color: var(--coral); }
+button.danger { color: var(--coral); border-color: var(--coral); }
+input.inline { width: 150px; max-width: 100%; padding: 3px 8px; }
 .name { background: none; border: 0; padding: 0; color: var(--text); font-size: 15px; font-weight: 500; }
 .name:hover { color: var(--teal); }
 input { font: inherit; font-size: 14px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; min-width: 0; }
@@ -45,17 +62,33 @@ form input { flex: 1 1 180px; }
 .empty { padding: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 #error { display: none; background: #3a2019; color: var(--coral); border: 1px solid var(--coral); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; }
 #error.show { display: block; }
-@media (max-width: 640px) { .hide-sm { display: none; } th, td { padding-left: 12px; padding-right: 12px; } }
+@media (max-width: 720px) {
+  .app { flex-direction: column; min-height: 0; }
+  .side { flex: none; flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 12px; }
+  .brand { padding: 0 12px 0 4px; }
+  .link { margin: 0 0 0 auto; padding: 0 4px; }
+  main { padding: 20px 14px 48px; }
+  .hide-sm { display: none; }
+  th, td { padding-left: 10px; padding-right: 10px; }
+  .actions { white-space: normal; }
+  .actions button { margin-top: 4px; }
+  input.inline { width: 90px; }
+}
 </style>
 </head>
 <body>
+<div class="app">
+<nav class="side" aria-label="Разделы">
+  <div class="brand">FOGs</div>
+  <a href="#pcs" data-page="pcs">ПК<span class="badge" id="foundBadge" hidden title="Обнаружены новые ПК"></span></a>
+  <a href="#settings" data-page="settings">Настройки</a>
+  <div class="link"><span class="dot" id="dot"></span><span id="link">подключение…</span></div>
+</nav>
 <main>
-  <header>
-    <h1>FOGs</h1>
-    <div class="link"><span class="dot" id="dot"></span><span id="link">подключение…</span></div>
-  </header>
   <div id="error" role="alert"></div>
 
+  <div class="page" id="page-pcs">
+  <h1>ПК</h1>
   <section>
     <div class="head"><h2>Компьютеры</h2><span class="count" id="hostCount"></span></div>
     <table id="hostTable">
@@ -73,12 +106,34 @@ form input { flex: 1 1 180px; }
   <section>
     <div class="head"><h2>Обнаружены в сети</h2><span class="count" id="foundCount"></span></div>
     <table id="foundTable">
-      <thead><tr><th>MAC</th><th>Был в сети</th><th></th></tr></thead>
+      <thead><tr><th>MAC</th><th class="hide-sm">Был в сети</th><th>Имя</th><th></th></tr></thead>
       <tbody id="found"></tbody>
     </table>
     <div class="empty" id="noFound">Незарегистрированные ПК, загрузившиеся по сети, появятся здесь. Сервер им не отвечает, пока вы их не добавите.</div>
   </section>
+  </div>
+
+  <div class="page" id="page-settings" hidden>
+  <h1>Настройки</h1>
+  <section>
+    <div class="head"><h2>Хранилище</h2></div>
+    <form class="field" id="settingsForm" style="display:block;padding:14px 18px">
+      <label for="imageDir">Папка образов</label>
+      <div class="row">
+        <input id="imageDir" placeholder="D:\fogs-images" required>
+        <button type="submit">Сохранить</button>
+      </div>
+      <p id="imageDirNote">Здесь сервер будет хранить образы дисков. Если папки нет, она будет создана.</p>
+    </form>
+    <div class="field">
+      <label>Каталог загрузки</label>
+      <div class="value" id="rootDir"></div>
+      <p>Задаётся при запуске флагом -root. Файлы отсюда доступны всем в сети без пароля, поэтому образы здесь хранить нельзя.</p>
+    </div>
+  </section>
+  </div>
 </main>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -134,11 +189,31 @@ function button(text, className, onclick) {
   return el('button', { type: 'button', textContent: text, className, onclick });
 }
 
+// editName swaps the name for an input. Enter or leaving the field saves, Esc cancels.
+function editName(h, nameButton) {
+  const input = el('input', { value: h.name, maxLength: 64, className: 'inline' });
+  input.setAttribute('aria-label', 'Имя компьютера');
+  let finished = false;
+  const finish = save => {
+    if (finished) return;
+    finished = true;
+    const next = input.value.trim();
+    input.blur();
+    if (save && next && next !== h.name) act('PATCH', '/api/hosts/' + h.id, { name: next });
+    else refresh();
+  };
+  input.onkeydown = e => {
+    if (e.key === 'Enter') finish(true);
+    if (e.key === 'Escape') finish(false);
+  };
+  input.onblur = () => finish(true);
+  nameButton.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
 function hostRow(h) {
-  const name = button(h.name, 'name', () => {
-    const next = prompt('Имя компьютера', h.name);
-    if (next !== null) act('PATCH', '/api/hosts/' + h.id, { name: next });
-  });
+  const name = button(h.name, 'name', () => editName(h, name));
   name.title = 'Переименовать';
 
   const chip = el('span', {
@@ -148,8 +223,12 @@ function hostRow(h) {
   const task = h.task
     ? button('Отменить', '', () => act('DELETE', `/api/hosts/${h.id}/task`))
     : button('Запустить агента', 'main', () => act('POST', `/api/hosts/${h.id}/task`));
+  // The second click confirms. The next refresh redraws the row, which resets it.
   const remove = button('Удалить', 'quiet', () => {
-    if (confirm(`Удалить ${h.name}? Сервер перестанет ему отвечать.`)) act('DELETE', '/api/hosts/' + h.id);
+    if (remove.dataset.armed) act('DELETE', '/api/hosts/' + h.id);
+    remove.dataset.armed = '1';
+    remove.textContent = 'Точно удалить?';
+    remove.className = 'danger';
   });
 
   return el('tr', {},
@@ -160,19 +239,31 @@ function hostRow(h) {
     el('td', { className: 'actions' }, task, ' ', remove));
 }
 
+const draftNames = {}; // names typed for discovered PCs, kept across refreshes
+
 function foundRow(d, index) {
-  const add = button('Добавить', 'main', () => {
-    const name = prompt('Имя компьютера', 'PC-' + String(index + 1).padStart(2, '0'));
-    if (name !== null) act('POST', '/api/hosts', { mac: d.mac, name });
+  const input = el('input', {
+    value: draftNames[d.mac] ?? 'PC-' + String(index + 1).padStart(2, '0'),
+    maxLength: 64,
+    className: 'inline',
+    oninput: () => { draftNames[d.mac] = input.value; },
   });
+  input.setAttribute('aria-label', 'Имя для ' + d.mac);
+  const save = () => act('POST', '/api/hosts', { mac: d.mac, name: input.value });
+  input.onkeydown = e => { if (e.key === 'Enter') save(); };
+  const add = button('Добавить', 'main', save);
   const hide = button('Скрыть', 'quiet', () => act('DELETE', '/api/discovered/' + d.mac));
   return el('tr', {},
     el('td', { className: 'mac', textContent: d.mac }),
-    el('td', { className: 'when', textContent: ago(d.lastSeen) }),
+    el('td', { className: 'when hide-sm', textContent: ago(d.lastSeen) }),
+    el('td', {}, input),
     el('td', { className: 'actions' }, add, ' ', hide));
 }
 
 function fill(list, tbody, table, empty, count, row) {
+  // Redrawing would take the field away from under the operator's hands.
+  if (tbody.contains(document.activeElement)
+      && document.activeElement.tagName === 'INPUT') return;
   tbody.replaceChildren(...list.map(row));
   table.style.display = list.length ? '' : 'none';
   empty.style.display = list.length ? 'none' : '';
@@ -185,6 +276,8 @@ async function refresh() {
     fill(s.hosts, $('hosts'), $('hostTable'), $('noHosts'), $('hostCount'), hostRow);
     fill(s.discovered, $('found'), $('foundTable'), $('noFound'), $('foundCount'),
       (d, i) => foundRow(d, s.hosts.length + i));
+    $('foundBadge').textContent = s.discovered.length;
+    $('foundBadge').hidden = !s.discovered.length;
     $('dot').classList.remove('off');
     $('link').textContent = 'на связи';
   } catch (e) {
@@ -198,6 +291,43 @@ $('addForm').addEventListener('submit', async e => {
   if (await act('POST', '/api/hosts', { mac: $('newMac').value, name: $('newName').value })) e.target.reset();
 });
 
+async function loadSettings() {
+  try {
+    const s = await api('GET', '/api/settings');
+    $('imageDir').value = s.imageDir;
+    $('rootDir').textContent = s.root;
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+$('settingsForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const note = $('imageDirNote');
+  try {
+    const s = await api('PUT', '/api/settings', { imageDir: $('imageDir').value });
+    $('imageDir').value = s.imageDir;
+    showError('');
+    note.textContent = 'Сохранено';
+    note.className = 'saved';
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
+function route() {
+  const page = location.hash === '#settings' ? 'settings' : 'pcs';
+  for (const name of ['pcs', 'settings']) $('page-' + name).hidden = name !== page;
+  document.querySelectorAll('.side a').forEach(a => {
+    if (a.dataset.page === page) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+  showError('');
+  if (page === 'settings') loadSettings();
+}
+
+window.addEventListener('hashchange', route);
+route();
 refresh();
 setInterval(refresh, 3000);
 </script>

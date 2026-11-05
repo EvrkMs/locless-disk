@@ -55,6 +55,48 @@ func TestDataSurvivesReopen(t *testing.T) {
 	}
 }
 
+func TestSettings(t *testing.T) {
+	s := open(t)
+	if v, err := s.Setting(ctx, SettingImageDir); v != "" || err != nil {
+		t.Fatalf("unset value: %q, err %v", v, err)
+	}
+	for _, want := range []string{`D:\images`, `E:\other`} {
+		if err := s.SetSetting(ctx, SettingImageDir, want); err != nil {
+			t.Fatalf("SetSetting: %v", err)
+		}
+		if v, err := s.Setting(ctx, SettingImageDir); v != want || err != nil {
+			t.Fatalf("value %q, err %v", v, err)
+		}
+	}
+}
+
+// TestUpgradeKeepsData is the case of a database made by an older server, like
+// the one already on the operator's disk.
+func TestUpgradeKeepsData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fogs.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	addHost(t, s, macA, "PC-01")
+	if _, err := s.db.Exec("DROP TABLE settings; PRAGMA user_version = 1"); err != nil {
+		t.Fatalf("downgrade: %v", err)
+	}
+	s.Close()
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	defer s.Close()
+	if hosts, _ := s.Hosts(ctx); len(hosts) != 1 {
+		t.Fatalf("hosts: %+v", hosts)
+	}
+	if err := s.SetSetting(ctx, SettingImageDir, "x"); err != nil {
+		t.Fatalf("SetSetting after upgrade: %v", err)
+	}
+}
+
 func TestRefusesNewerDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fogs.db")
 	s, err := Open(path)

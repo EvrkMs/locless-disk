@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,12 +20,104 @@ const addr = "127.0.0.1:8081"
 
 func panel(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "fogs.db"))
+	h, s, _ := panelWithRoot(t)
+	return h, s
+}
+
+// panelWithRoot also returns the directory served to clients.
+func panelWithRoot(t *testing.T) (http.Handler, *store.Store, string) {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "fogs.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, addr, slog.New(slog.NewTextHandler(io.Discard, nil))), s
+	root := filepath.Join(dir, "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	h := New(Config{Store: s, Addr: addr, Root: root, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	return h, s, root
+}
+
+func saveDir(h http.Handler, dir string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]string{"imageDir": dir})
+	return do(h, http.MethodPut, "/api/settings", string(body))
+}
+
+func TestImageDirIsCreatedAndKept(t *testing.T) {
+	h, _, root := panelWithRoot(t)
+	dir := filepath.Join(filepath.Dir(root), "images", "club")
+
+	if w := saveDir(h, "  "+dir+"  "); w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("directory not created: %v", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatalf("the write check left files behind: %v", entries)
+	}
+
+	var got struct{ ImageDir, Root string }
+	w := do(h, http.MethodGet, "/api/settings", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ImageDir != dir || got.Root != root {
+		t.Fatalf("settings: %+v", got)
+	}
+}
+
+// TestImageDirStaysOutOfRoot guards the images: everything under -root is
+// served to the whole network without a login.
+func TestImageDirStaysOutOfRoot(t *testing.T) {
+	h, s, root := panelWithRoot(t)
+	for name, dir := range map[string]string{
+		"root itself": root,
+		"below root":  filepath.Join(root, "images"),
+		"sneaky path": filepath.Join(root, "a", "..", "images"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if w := saveDir(h, dir); w.Code != http.StatusBadRequest {
+				t.Fatalf("status %d: %s", w.Code, w.Body)
+			}
+		})
+	}
+	if v, _ := s.Setting(context.Background(), store.SettingImageDir); v != "" {
+		t.Fatalf("a refused path was stored: %q", v)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Fatalf("a refused path left something in the served directory: %v", entries)
+	}
+}
+
+func TestImageDirNextToRootIsFine(t *testing.T) {
+	h, _, root := panelWithRoot(t)
+	if w := saveDir(h, root+"-images"); w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+}
+
+func TestImageDirRejectsBadPaths(t *testing.T) {
+	h, _, root := panelWithRoot(t)
+	file := filepath.Join(filepath.Dir(root), "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	for name, dir := range map[string]string{
+		"empty":    "   ",
+		"relative": "images",
+		"a file":   file,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if w := saveDir(h, dir); w.Code != http.StatusBadRequest {
+				t.Fatalf("status %d: %s", w.Code, w.Body)
+			}
+		})
+	}
 }
 
 func do(h http.Handler, method, path, body string) *httptest.ResponseRecorder {

@@ -206,7 +206,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	panel := &http.Server{
-		Handler:           web.New(db, cfg.admin, log.With("service", "panel")),
+		Handler:           web.New(web.Config{Store: db, Addr: cfg.admin, Root: cfg.root, Log: log.With("service", "panel")}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

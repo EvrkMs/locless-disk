@@ -36,16 +36,27 @@ type Store interface {
 	ForgetDiscovered(context.Context, net.HardwareAddr) error
 	CreateTask(context.Context, int64, string) (store.Task, error)
 	CancelTask(context.Context, int64) error
+	Setting(context.Context, string) (string, error)
+	SetSetting(context.Context, string, string) error
+}
+
+// Config is what the panel needs from the server.
+type Config struct {
+	Store Store
+	Addr  string // host:port the panel listens on
+	Root  string // directory served to clients without a login
+	Log   *slog.Logger
 }
 
 type server struct {
 	store Store
+	root  string
 	log   *slog.Logger
 }
 
-// New returns the panel handler. addr is the host:port it listens on.
-func New(s Store, addr string, log *slog.Logger) http.Handler {
-	h := &server{store: s, log: log}
+// New returns the panel handler.
+func New(c Config) http.Handler {
+	h := &server{store: c.Store, root: c.Root, log: c.Log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -58,7 +69,9 @@ func New(s Store, addr string, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /api/hosts/{id}/task", h.createTask)
 	mux.HandleFunc("DELETE /api/hosts/{id}/task", h.cancelTask)
 	mux.HandleFunc("DELETE /api/discovered/{mac}", h.forgetDiscovered)
-	return guard(addr, mux)
+	mux.HandleFunc("GET /api/settings", h.settings)
+	mux.HandleFunc("PUT /api/settings", h.saveSettings)
+	return guard(c.Addr, mux)
 }
 
 // guard protects a panel without a login from web pages open in the operator's
