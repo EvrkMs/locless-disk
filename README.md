@@ -133,8 +133,8 @@ bin/fogs-server.exe -ip 192.168.88.105 -root D:/fogs-tftp
 
 | Файл | Откуда |
 |---|---|
-| `ipxe-shim.efi` | `x86_64-sb/shimx64.efi` из `ipxeboot.tar.gz` [релиза iPXE](https://github.com/ipxe/ipxe/releases), переименовать: shim ищет iPXE по своему имени |
-| `ipxe.efi` | `x86_64-sb/ipxe.efi` из того же архива, обычная сборка не подойдёт |
+| `ipxe-shim.efi` | скопировать из [EFI/](EFI). Это `x86_64-sb/shimx64.efi` из `ipxeboot.tar.gz` [релиза iPXE](https://github.com/ipxe/ipxe/releases), имя менять нельзя: shim ищет iPXE по своему имени |
+| `ipxe.efi` | скопировать из [EFI/](EFI). Это `x86_64-sb/ipxe.efi` из того же архива: с файлом из другой сборки shim потребует MOK |
 | `wimboot` | [релизы wimboot](https://github.com/ipxe/wimboot/releases/latest) |
 | `WinPE/boot.wim` | `sources\boot.wim` с ISO Windows, без изменений |
 | `agent/fogs-agent.exe` | `go build -o D:/fogs-tftp/agent/fogs-agent.exe ./agent` |
@@ -144,9 +144,9 @@ bin/fogs-server.exe -ip 192.168.88.105 -root D:/fogs-tftp
 
 Что нужно для загрузки клиента:
 
-- файлы `ipxe-shim.efi` и `ipxe.efi` в `-root` (в репозитории их нет, см. таблицу ниже);
+- файлы `ipxe-shim.efi` и `ipxe.efi` из `EFI/` в `-root`, см. таблицу выше;
 - разрешающее входящее правило брандмауэра Windows для `fogs-server.exe`;
-- отключённый Secure Boot на клиенте, пока не выбран путь из §12 `DESIGN.md`.
+- на клиенте Secure Boot можно не отключать: с этой парой файлов ПК грузится без установки сертификатов и MOK.
 
 На Linux сокет, привязанный к конкретному адресу, не получает broadcast, поэтому
 порт 67 там пока не заработает. Проверено только на Windows.
