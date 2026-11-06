@@ -135,7 +135,7 @@ bin/fogs-server.exe -ip 192.168.88.105 -root D:/fogs-tftp
 |---|---|
 | `ipxe-shim.efi` | скопировать из [EFI/](EFI). Это `x86_64-sb/shimx64.efi` из `ipxeboot.tar.gz` [релиза iPXE](https://github.com/ipxe/ipxe/releases), имя менять нельзя: shim ищет iPXE по своему имени |
 | `ipxe.efi` | скопировать из [EFI/](EFI). Это `x86_64-sb/ipxe.efi` из того же архива: с файлом из другой сборки shim потребует MOK |
-| `wimboot` | [релизы wimboot](https://github.com/ipxe/wimboot/releases/latest) |
+| `wimboot` | скопировать из [EFI/](EFI). Это файл из [релизов wimboot](https://github.com/ipxe/wimboot/releases/latest) |
 | `WinPE/boot.wim` | `sources\boot.wim` с ISO Windows, без изменений |
 | `agent/fogs-agent.exe` | `go build -o D:/fogs-tftp/agent/fogs-agent.exe ./agent` |
 
