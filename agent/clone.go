@@ -84,6 +84,8 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 		st.Center, st.Caption = "0%", "подготовка"
 		st.Title, st.Detail = "Клонирование диска", "Образ "+task.Image+" · не выключайте компьютер"
 	})
+	w.rec = newRecorder()
+	w.rec.Step("Открытие диска")
 
 	src, err := w.openDisk()
 	if err != nil {
@@ -94,6 +96,7 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 
 	// One clone per image, and the turn comes before the shrink: a volume must not
 	// sit shrunk for as long as somebody else takes.
+	w.rec.Step("Ожидание очереди на образ")
 	err = w.waitTurn(task, func() error { return w.client.cloneClaim(task.ID) })
 	if errors.Is(err, errTaskGone) {
 		return w.cancelled()
@@ -104,6 +107,7 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 
 	// Like FOG: the table is on the server before the disk changes, so the volume
 	// can get its size back even if this PC loses power in the middle of the clone.
+	w.rec.Step("Сжатие тома")
 	table, err := src.Table()
 	if err != nil {
 		return fmt.Errorf("не удалось прочитать таблицу разделов: %w", err)
@@ -126,6 +130,7 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 	// The volume comes back before anything else happens, whatever the capture did:
 	// the result of the task has to say whether it worked.
 	var back error
+	w.rec.Step("Возврат размера тома")
 	if shrunk {
 		if back = w.giveBack(src, table); back != nil {
 			back = fmt.Errorf("том эталона не восстановлен: %w", back)
@@ -146,6 +151,7 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 	}
 
 	w.setStage(stageFinish)
+	w.rec.Step("Проверка и сохранение на сервере")
 	res, err := w.client.cloneFinish(task.ID, m)
 	if errors.Is(err, errTaskGone) {
 		return w.cancelled()
@@ -173,6 +179,7 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 // capture sends the disk to the server and returns the table the image was taken
 // with, which is the shrunk one.
 func (w *worker) capture(task *proto.AgentTask, src source) (proto.Manifest, error) {
+	w.rec.Step("Чтение диска и отправка")
 	info, err := w.client.cloneStart(task.ID)
 	if errors.Is(err, errTaskGone) {
 		return proto.Manifest{}, err
@@ -297,7 +304,13 @@ func (c *cloneRun) readDisk() error {
 		}
 	})
 
-	for b := range batches {
+	for {
+		waited := c.w.rec.Time(workSendWaits)
+		b, ok := <-batches
+		waited()
+		if !ok {
+			return nil
+		}
 		if b.err != nil {
 			return b.err
 		}
@@ -306,8 +319,19 @@ func (c *cloneRun) readDisk() error {
 		}
 		free <- b.slab
 	}
-	return nil
 }
+
+// Kinds of work of a clone, as the metrics name them.
+const (
+	workDiskRead  = "чтение диска"
+	workHash      = "хэш SHA-256"
+	workReadWaits = "чтение ждёт отправку"
+	workSendWaits = "отправка ждёт чтение диска"
+	workCheck     = "проверка хэшей на сервере"
+	workCompress  = "сжатие zstd"
+	workBuild     = "сборка запроса"
+	workUpload    = "передача на сервер"
+)
 
 // errReadStopped means nobody wants the batches any more.
 var errReadStopped = errors.New("чтение диска остановлено")
@@ -339,29 +363,41 @@ func (r *diskReader) run(m proto.Manifest) error {
 
 func (r *diskReader) readPartition(p proto.Partition) error {
 	size := uint64(r.c.blockSize)
+	rec := r.c.w.rec
 	for offset := uint64(0); offset < p.Size; offset += size {
 		if r.batch.slab == nil {
+			waited := rec.Time(workReadWaits)
 			select {
 			case r.batch.slab = <-r.free:
+				waited()
 			case <-r.stop:
 				return errReadStopped
 			}
 		}
 		start := uint64(len(r.batch.blocks)) * size
 		raw := r.batch.slab[start : start+min(size, p.Size-offset)]
+		read := rec.Time(workDiskRead)
 		used, err := r.c.src.ReadBlock(p.Number, offset, raw)
+		read()
 		if err != nil {
 			return fmt.Errorf("ошибка чтения раздела %d: %w", p.Number, err)
 		}
 		if !used {
+			rec.Count("свободных блоков пропущено", 1)
 			continue
 		}
 		// Used and all zeros: deploy must overwrite this place, so it stays in the
 		// index as a zero entry, with no data.
 		block := pending{partition: p.Number, position: uint32(offset / size)}
-		if !isEmpty(raw) {
+		if isEmpty(raw) {
+			rec.Count("нулевых блоков", 1)
+		} else {
+			hashed := rec.Time(workHash)
 			block.raw, block.hash = raw, proto.HashBlock(raw)
+			hashed()
+			rec.Count("блоков с данными", 1)
 		}
+		rec.Bytes("прочитано с диска", uint64(len(raw)))
 		r.batch.blocks = append(r.batch.blocks, block)
 		r.batch.read += uint64(len(raw))
 		if len(r.batch.blocks) == cloneBatch {
@@ -375,6 +411,7 @@ func (r *diskReader) readPartition(p proto.Partition) error {
 
 // send hands the batch over and starts a new one.
 func (r *diskReader) send() error {
+	defer r.c.w.rec.Time(workReadWaits)()
 	select {
 	case r.out <- r.batch:
 		r.batch = readBatch{}
@@ -399,7 +436,10 @@ func (c *cloneRun) flush(batch readBatch) error {
 	for i, b := range batch.blocks {
 		hashes[i] = b.hash
 	}
+	rec := c.w.rec
+	checked := rec.Time(workCheck)
 	missing, err := c.w.client.cloneCheck(c.task, hashes)
+	checked()
 	if err != nil {
 		return err
 	}
@@ -407,9 +447,14 @@ func (c *cloneRun) flush(batch readBatch) error {
 	if err != nil {
 		return err
 	}
-	if err := c.w.client.clonePut(c.task, body); err != nil {
+	uploaded := rec.Time(workUpload)
+	err = c.w.client.clonePut(c.task, body)
+	uploaded()
+	if err != nil {
 		return err
 	}
+	rec.Bytes("отправлено по сети", uint64(len(body)))
+	rec.Count("пачек", 1)
 	c.read += batch.read
 	c.sent += uint64(len(body))
 	c.done += uint64(len(batch.blocks))
@@ -424,11 +469,21 @@ func (c *cloneRun) encode(blocks []pending, missing []byte) ([]byte, error) {
 	slots := make(chan struct{}, runtime.NumCPU())
 	var wg sync.WaitGroup
 	seen := map[proto.Sum]bool{}
+	rec := c.w.rec
+	compressed := rec.Time(workCompress)
 	for i, b := range blocks {
 		records[i] = proto.PutRecord{Partition: b.partition, Position: b.position, Hash: b.hash}
-		if b.raw == nil || missing[i] == 0 || seen[b.hash] {
+		switch {
+		case b.raw == nil:
+			continue
+		case missing[i] == 0:
+			rec.Count("блоков уже было на сервере", 1)
+			continue
+		case seen[b.hash]:
+			rec.Count("повторов внутри пачки", 1)
 			continue // equal blocks in one batch travel once
 		}
+		rec.Count("новых блоков отправлено", 1)
 		seen[b.hash] = true
 		wg.Add(1)
 		slots <- struct{}{}
@@ -443,9 +498,11 @@ func (c *cloneRun) encode(blocks []pending, missing []byte) ([]byte, error) {
 		}()
 	}
 	wg.Wait()
+	compressed()
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
+	defer rec.Time(workBuild)()
 	var body []byte
 	for _, r := range records {
 		body = proto.AppendPut(body, r)
@@ -455,6 +512,7 @@ func (c *cloneRun) encode(blocks []pending, missing []byte) ([]byte, error) {
 
 // report updates the screen and, now and then, the panel.
 func (c *cloneRun) report() error {
+	c.w.rec.Sample()
 	percent := 99
 	if c.total > 0 {
 		percent = min(int(c.done*100/c.total), 99)

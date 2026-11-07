@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -717,5 +718,43 @@ func TestBrokenChainIsRefusedByThePanel(t *testing.T) {
 	}
 	if st := getState(t, h); len(st.Images[0].Versions) != 2 || st.Images[0].Versions[1].Disabled {
 		t.Fatalf("versions: %+v", st.Images[0].Versions)
+	}
+}
+
+// TestTaskMetricsAreServed: the panel gets what the agent measured, as it was sent.
+func TestTaskMetricsAreServed(t *testing.T) {
+	h, s, _, path := imageEnv(t)
+	ctx := context.Background()
+	w := do(h, http.MethodPost, path+"/task", `{"kind":"agent"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("task: %d %s", w.Code, w.Body)
+	}
+	var task store.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &task); err != nil {
+		t.Fatalf("task: %v", err)
+	}
+	url := "/api/tasks/" + strconv.FormatInt(task.ID, 10) + "/metrics"
+	if w := do(h, http.MethodGet, url, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("no metrics yet: %d", w.Code)
+	}
+
+	hosts, _ := s.Hosts(ctx)
+	mac, _ := net.ParseMAC(hosts[0].MAC)
+	const metrics = `{"totalMs":5000,"steps":[{"name":"Шаг","ms":5000}]}`
+	if err := s.SaveMetrics(ctx, mac, task.ID, metrics); err != nil {
+		t.Fatalf("SaveMetrics: %v", err)
+	}
+	w = do(h, http.MethodGet, url, "")
+	if w.Code != http.StatusOK || w.Body.String() != metrics || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("metrics: %d %q %q", w.Code, w.Body, w.Header().Get("Content-Type"))
+	}
+	if tasks, _ := s.RecentTasks(ctx, 1); !tasks[0].HasMetrics {
+		t.Fatalf("tasks: %+v", tasks)
+	}
+	if w := do(h, http.MethodGet, "/api/tasks/x/metrics", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad id: %d", w.Code)
+	}
+	if w := do(h, http.MethodGet, "/api/tasks/999/metrics", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown task: %d", w.Code)
 	}
 }

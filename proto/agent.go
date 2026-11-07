@@ -44,13 +44,46 @@ type AgentProgress struct {
 	Stage   string `json:"stage"`
 	Message string `json:"message"`
 	Details string `json:"details,omitempty"` // the stack of a crash, for the log of the server
+	// Metrics come with the report of a failure: how far the task got and how long it took.
+	Metrics *TaskMetrics `json:"metrics,omitempty"`
 }
 
 // AgentResult ends a task.
 type AgentResult struct {
-	MAC     string `json:"mac"`
-	OK      bool   `json:"ok"`
-	Message string `json:"message"`
+	MAC     string       `json:"mac"`
+	OK      bool         `json:"ok"`
+	Message string       `json:"message"`
+	Metrics *TaskMetrics `json:"metrics,omitempty"`
+}
+
+// TaskMetrics says where a clone or a deploy spent its time and what it used, so a
+// slow task can be explained afterwards and a change can be measured.
+type TaskMetrics struct {
+	TotalMs int64 `json:"totalMs"`
+	// Steps are the stages of the task in order, by the clock; they add up to the total.
+	Steps []MetricTime `json:"steps"`
+	// Work is the time each kind of work took. In a pipeline the kinds run at once,
+	// so they overlap; a stage that waits a lot shows which other one is too slow.
+	Work    []MetricTime   `json:"work"`
+	Amounts []MetricAmount `json:"amounts"`
+
+	CPUMs      int64  `json:"cpuMs"`      // processor time of the agent, all cores together
+	Cores      int    `json:"cores"`      // logical processors of the PC
+	PeakMemory uint64 `json:"peakMemory"` // the most memory the agent held, in bytes
+	GCCycles   uint32 `json:"gcCycles"`   // garbage collections during the task
+}
+
+// MetricTime is a named span of time.
+type MetricTime struct {
+	Name string `json:"name"`
+	Ms   int64  `json:"ms"`
+}
+
+// MetricAmount is a named quantity: bytes when Bytes is set, a count otherwise.
+type MetricAmount struct {
+	Name  string `json:"name"`
+	Value uint64 `json:"value"`
+	Bytes bool   `json:"bytes,omitempty"`
 }
 
 // Ways for a PC to leave iPXE and boot from its disk.

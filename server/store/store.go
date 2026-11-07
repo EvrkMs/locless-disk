@@ -104,6 +104,8 @@ var migrations = []string{`
 	ALTER TABLE image_versions ADD COLUMN parent INTEGER NOT NULL DEFAULT 0;
 	ALTER TABLE image_versions ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;
 	UPDATE image_versions SET parent = number - 1;
+`, `
+	ALTER TABLE tasks ADD COLUMN metrics TEXT NOT NULL DEFAULT '';
 `}
 
 // Setting keys.
@@ -371,14 +373,15 @@ func (s *Store) Hosts(ctx context.Context) ([]Host, error) {
 // HostTask is a task with the PC it belongs to.
 type HostTask struct {
 	Task
-	HostID int64  `json:"hostId"`
-	Host   string `json:"host"`
+	HostID     int64  `json:"hostId"`
+	Host       string `json:"host"`
+	HasMetrics bool   `json:"hasMetrics"` // the agent sent what the task took, see TaskMetrics
 }
 
 // RecentTasks lists unfinished tasks and then the latest finished ones.
 func (s *Store) RecentTasks(ctx context.Context, limit int) ([]HostTask, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.id, t.kind, t.image, t.status, t.created_at, t.finished_at, t.percent, t.stage, t.message, h.id, h.name
+		SELECT t.id, t.kind, t.image, t.status, t.created_at, t.finished_at, t.percent, t.stage, t.message, h.id, h.name, t.metrics != ''
 		FROM tasks t JOIN hosts h ON h.id = t.host_id
 		ORDER BY t.finished_at IS NOT NULL, t.id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -390,7 +393,7 @@ func (s *Store) RecentTasks(ctx context.Context, limit int) ([]HostTask, error) 
 		var t HostTask
 		var created int64
 		var finished sql.NullInt64
-		if err := rows.Scan(&t.ID, &t.Kind, &t.Image, &t.Status, &created, &finished, &t.Percent, &t.Stage, &t.Message, &t.HostID, &t.Host); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &t.Image, &t.Status, &created, &finished, &t.Percent, &t.Stage, &t.Message, &t.HostID, &t.Host, &t.HasMetrics); err != nil {
 			return nil, err
 		}
 		t.CreatedAt = fromUnix(created)
@@ -577,6 +580,25 @@ func (s *Store) FinishTask(ctx context.Context, mac net.HardwareAddr, id int64, 
 		WHERE id = ? AND finished_at IS NULL AND host_id = (SELECT id FROM hosts WHERE mac = ?)`,
 		status, message, unix(time.Now()), id, mac.String())
 	return affected(res, err)
+}
+
+// SaveMetrics keeps what the agent measured for a task of its PC, as JSON. A later
+// report replaces an earlier one: a failed attempt and then the result.
+func (s *Store) SaveMetrics(ctx context.Context, mac net.HardwareAddr, id int64, metrics string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET metrics = ?
+		WHERE id = ? AND host_id = (SELECT id FROM hosts WHERE mac = ?)`, metrics, id, mac.String())
+	return affected(res, err)
+}
+
+// TaskMetrics returns the metrics of a task as JSON, or "" if the agent sent none.
+func (s *Store) TaskMetrics(ctx context.Context, id int64) (string, error) {
+	var metrics string
+	err := s.db.QueryRowContext(ctx, "SELECT metrics FROM tasks WHERE id = ?", id).Scan(&metrics)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return metrics, err
 }
 
 // MarkStarted records that the PC was sent into WinPE for its task. After a

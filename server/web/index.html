@@ -68,6 +68,14 @@ dialog .field { border: 0; padding: 10px 20px; }
 dialog input, dialog select { width: 100%; max-width: none; }
 dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; }
 dialog .alert { margin: 8px 20px 0; }
+dialog.wide { width: min(640px, calc(100vw - 32px)); }
+.metrics { padding: 4px 20px 0; max-height: 70vh; overflow-y: auto; }
+.metrics h3 { font-size: 13px; font-weight: 500; color: var(--muted); margin: 14px 0 4px; }
+.metrics table td { padding: 5px 8px; font-size: 13px; }
+.metrics table td:first-child { padding-left: 0; }
+.metrics td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.metrics .bar { width: 110px; }
+.metrics p { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
 .mac { font-family: Consolas, ui-monospace, monospace; font-size: 13px; color: var(--soft); }
 .when { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .actions { text-align: right; white-space: nowrap; }
@@ -157,7 +165,7 @@ form input { flex: 1 1 180px; }
   <section>
     <div class="head"><h2>История <span class="count" id="doneCount"></span></h2><button type="button" id="onlyErrors" aria-pressed="false">Только ошибки</button></div>
     <table id="doneTable" class="cols">
-      <thead><tr><th>ПК</th><th>Задача</th><th>Образ</th><th>Статус</th><th>Сообщение</th><th class="hide-sm">Создана</th><th>Завершена</th></tr></thead>
+      <thead><tr><th>ПК</th><th>Задача</th><th>Образ</th><th>Статус</th><th>Сообщение</th><th class="hide-sm">Создана</th><th>Завершена</th><th aria-label="Метрики"></th></tr></thead>
       <tbody id="done"></tbody>
     </table>
     <div class="empty" id="noDone">Завершённых задач нет.</div>
@@ -222,6 +230,12 @@ form input { flex: 1 1 180px; }
   </div>
 </main>
 </div>
+
+<dialog id="metricsDialog" class="wide" aria-labelledby="metricsTitle">
+  <h2 id="metricsTitle"></h2>
+  <div class="metrics" id="metricsBody"></div>
+  <div class="buttons"><button type="button" id="metricsClose">Закрыть</button></div>
+</dialog>
 
 <dialog id="hostDialog" aria-labelledby="hostDialogTitle">
   <form id="hostForm" method="dialog">
@@ -454,6 +468,7 @@ function openHostDialog({ host = null, mac = '', name = '' }) {
 
 $('addHost').addEventListener('click', () => openHostDialog({}));
 $('hostCancel').addEventListener('click', () => $('hostDialog').close());
+$('metricsClose').addEventListener('click', () => $('metricsDialog').close());
 $('hostForm').addEventListener('submit', async e => {
   e.preventDefault();
   const name = $('hostName').value, image = $('hostImage').value;
@@ -496,7 +511,63 @@ function doneRow(t) {
     el('td', {}, statusChip(t)),
     message,
     el('td', { className: 'when hide-sm', textContent: ago(t.createdAt) }),
-    el('td', { className: 'when', textContent: ago(t.finishedAt) }));
+    el('td', { className: 'when', textContent: ago(t.finishedAt) }),
+    el('td', { className: 'actions' }, t.hasMetrics
+      ? el('button', { type: 'button', textContent: 'Метрики', onclick: () => showMetrics(t) })
+      : ''));
+}
+
+// Metrics of a clone or a deploy: where the time went and what the agent used.
+function formatMs(ms) {
+  if (ms < 1000) return ms + ' мс';
+  const sec = ms / 1000;
+  if (sec < 60) return sec.toFixed(1) + ' с';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + ' мин ' + Math.round(sec % 60) + ' с';
+  return Math.floor(min / 60) + ' ч ' + (min % 60) + ' мин';
+}
+
+function metricRows(list, total, note) {
+  const rows = list.map(m => el('tr', {},
+    el('td', { textContent: m.name }),
+    el('td', {}, el('span', { className: 'bar' }, el('span', { style: `width: ${total ? Math.min(100, m.ms * 100 / total) : 0}%` }))),
+    el('td', { className: 'num', textContent: formatMs(m.ms) }),
+    el('td', { className: 'num', textContent: total ? Math.round(m.ms * 100 / total) + '%' : '' })));
+  const parts = [el('table', {}, el('tbody', {}, ...rows))];
+  if (note) parts.push(el('p', { textContent: note }));
+  return parts;
+}
+
+async function showMetrics(t) {
+  $('metricsTitle').textContent = (kindText[t.kind] || t.kind) + ' · ' + t.host + (t.image ? ' · ' + t.image : '');
+  $('metricsBody').replaceChildren(el('p', { textContent: 'Загрузка…' }));
+  $('metricsDialog').showModal();
+  let m;
+  try {
+    m = await api('GET', `/api/tasks/${t.id}/metrics`);
+  } catch (e) {
+    $('metricsBody').replaceChildren(el('p', { textContent: e.message }));
+    return;
+  }
+  const load = m.totalMs && m.cores ? Math.round(m.cpuMs * 100 / (m.totalMs * m.cores)) : 0;
+  const summary = [
+    ['Всего', formatMs(m.totalMs)],
+    ['Процессор', formatMs(m.cpuMs) + ` · ${m.cores} ядер, в среднем ${load}% всех ядер`],
+    ['Память агента, пик', formatSize(m.peakMemory)],
+    ['Сборок мусора', String(m.gcCycles)],
+  ];
+  const amounts = (m.amounts || []).map(a => el('tr', {},
+    el('td', { textContent: a.name }),
+    el('td', { className: 'num', textContent: a.bytes ? formatSize(a.value) : a.value.toLocaleString('ru-RU') })));
+  $('metricsBody').replaceChildren(
+    el('table', {}, el('tbody', {}, ...summary.map(([k, v]) => el('tr', {}, el('td', { textContent: k }), el('td', { className: 'num', textContent: v }))))),
+    el('h3', { textContent: 'Этапы' }),
+    ...metricRows(m.steps || [], m.totalMs),
+    el('h3', { textContent: 'Работа внутри этапов' }),
+    ...metricRows(m.work || [], m.totalMs,
+      'Чтение, сжатие, сеть и запись идут одновременно, поэтому время пересекается. Большое «ждёт» показывает, какая другая часть не успевает.'),
+    el('h3', { textContent: 'Объёмы' }),
+    el('table', {}, el('tbody', {}, ...amounts)));
 }
 
 // A click on a column header makes that column stand out. It is a rule and not a

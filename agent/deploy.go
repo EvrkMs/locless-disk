@@ -108,6 +108,8 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 		st.Center, st.Caption = "0%", "подготовка"
 		st.Title, st.Detail = "Развёртывание образа", "Образ "+task.Image
 	})
+	w.rec = newRecorder()
+	w.rec.Step("Открытие диска")
 
 	dst, err := w.openTarget()
 	if err != nil {
@@ -116,6 +118,7 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 	defer dst.Close()
 	w.screen.log("диск: " + dst.Describe())
 
+	w.rec.Step("Ожидание очереди на образ")
 	var info proto.DeployInfo
 	err = w.waitTurn(task, func() (err error) {
 		info, err = w.client.deployStart(task.ID)
@@ -134,6 +137,7 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 		return err
 	}
 
+	w.rec.Step("Отсчёт перед стиранием")
 	if !w.confirmWipe(dst, "образ "+task.Image) {
 		w.screen.log("отменено на компьютере")
 		if err := w.finish(task.ID, false, "отменено на компьютере"); err != nil {
@@ -144,6 +148,7 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 	}
 
 	w.screen.update(func(st *ui.State) { st.Hint = "Не выключайте компьютер" })
+	w.rec.Step("Таблица разделов")
 	if err := dst.Prepare(fitted); err != nil {
 		return fmt.Errorf("не удалось подготовить диск: %w", err)
 	}
@@ -164,23 +169,30 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 	}
 
 	w.setStage(stageFinish)
+	w.rec.Step("Сброс записи на диск")
 	if err := dst.Finish(); err != nil {
 		return fmt.Errorf("не удалось завершить запись: %w", err)
 	}
 	if err := dst.Close(); err != nil {
 		return fmt.Errorf("не удалось завершить запись: %w", err)
 	}
+	writing := time.Since(d.started)
+	w.rec.Step("Расширение тома")
 	if err := dst.Grow(fitted); err != nil {
 		// Windows still boots, on a smaller volume.
 		w.screen.log("том не расширен: " + err.Error())
 	}
 	// The image is on the disk either way: without this entry the PC still boots
 	// through the network or the fallback loader, so a failure only goes to the log.
+	w.rec.Step("Загрузочная запись")
 	if err := dst.MakeBootable(fitted); err != nil {
 		w.screen.log("загрузочная запись: " + err.Error())
 	}
+	w.rec.Step("Имя ПК")
+	named := w.nameWindows(dst)
+	w.rec.Step("Отчёт серверу")
 	message := fmt.Sprintf("%s v%d, записано %s за %s, %s", task.Image, info.Version, formatBytes(d.written),
-		formatDuration(time.Since(d.started)), w.nameWindows(dst))
+		formatDuration(writing), named)
 	if err := w.finish(task.ID, true, message); err != nil {
 		return err
 	}
@@ -361,6 +373,8 @@ type deployRun struct {
 
 // write fills every place of the list on the disk.
 func (d *deployRun) write() error {
+	rec := d.w.rec
+	rec.Step("Список блоков")
 	var err error
 	if d.entries, err = d.w.client.deployList(d.task); err != nil {
 		return err
@@ -376,13 +390,16 @@ func (d *deployRun) write() error {
 	var batches [][]uint32
 	var batch []uint32
 	zeros := make([]byte, d.info.BlockSize)
+	rec.Step("Запись нулевых блоков")
 	for i, e := range d.entries {
 		if e.Zero() {
 			if err := d.writeZero(e, zeros); err != nil {
 				return err
 			}
+			rec.Count("нулевых блоков", 1)
 			continue
 		}
+		rec.Count("блоков с данными", 1)
 		batch = append(batch, uint32(i))
 		if len(batch) == cloneBatch {
 			batches = append(batches, batch)
@@ -392,8 +409,18 @@ func (d *deployRun) write() error {
 	if len(batch) > 0 {
 		batches = append(batches, batch)
 	}
+	rec.Step("Загрузка и запись блоков")
 	return d.pipeline(batches)
 }
+
+// Kinds of work of a deploy, as the metrics name them.
+const (
+	workFetch       = "загрузка с сервера"
+	workDecode      = "распаковка и проверка"
+	workWrite       = "запись на диск"
+	workUnpackWaits = "распаковка ждёт запись"
+	workWriteWaits  = "запись ждёт загрузку"
+)
 
 // pipeline keeps the network, the processor and the disk busy at once: one batch is
 // on its way from the server while the one before it is unpacked and the one before
@@ -410,16 +437,25 @@ func (d *deployRun) pipeline(batches [][]uint32) error {
 	wg.Go(func() { d.fetch(ctx, batches, fetched) })
 	wg.Go(func() { d.unpack(ctx, fetched, unpacked, free) })
 
-	for b := range unpacked {
+	rec := d.w.rec
+	for {
+		waited := rec.Time(workWriteWaits)
+		b, ok := <-unpacked
+		waited()
+		if !ok {
+			return nil
+		}
 		if b.err != nil {
 			return b.err
 		}
-		if err := d.store(b); err != nil {
+		written := rec.Time(workWrite)
+		err := d.store(b)
+		written()
+		if err != nil {
 			return err
 		}
 		free <- b.slab
 	}
-	return nil
 }
 
 // deployBatch is one batch on its way through the pipeline. A stage that fails puts
@@ -437,10 +473,14 @@ func (d *deployRun) fetch(ctx context.Context, batches [][]uint32, out chan<- de
 	defer close(out)
 	for _, numbers := range batches {
 		b := deployBatch{numbers: numbers}
+		fetched := d.w.rec.Time(workFetch)
 		b.err = recovery.Run(func() (err error) { // a panic here would end the whole agent
 			b.body, err = d.w.client.deployBlocks(ctx, d.task, numbers)
 			return err
 		})
+		fetched()
+		d.w.rec.Bytes("загружено по сети", uint64(len(b.body)))
+		d.w.rec.Count("пачек", 1)
 		select {
 		case out <- b:
 		case <-ctx.Done():
@@ -458,12 +498,16 @@ func (d *deployRun) unpack(ctx context.Context, in <-chan deployBatch, out chan<
 	defer close(out)
 	for b := range in {
 		if b.err == nil {
+			waited := d.w.rec.Time(workUnpackWaits)
 			select {
 			case b.slab = <-free:
+				waited()
 			case <-ctx.Done():
 				return
 			}
+			decoded := d.w.rec.Time(workDecode)
 			b.err = recovery.Run(func() error { return d.decode(&b) })
+			decoded()
 		}
 		select {
 		case out <- b:
@@ -530,6 +574,7 @@ func (d *deployRun) writeZero(e proto.DeployEntry, zeros []byte) error {
 		return fmt.Errorf("ошибка записи раздела %d: %w", e.Partition, err)
 	}
 	d.written += length
+	d.w.rec.Bytes("записано на диск", length)
 	d.done++
 	return nil
 }
@@ -550,6 +595,7 @@ func (d *deployRun) store(b deployBatch) error {
 			return fmt.Errorf("ошибка записи раздела %d: %w", e.Partition, err)
 		}
 		d.written += length
+		d.w.rec.Bytes("записано на диск", length)
 		d.done++
 	}
 	return d.report()
@@ -557,6 +603,7 @@ func (d *deployRun) store(b deployBatch) error {
 
 // report updates the screen and, now and then, the panel.
 func (d *deployRun) report() error {
+	d.w.rec.Sample()
 	percent := min(d.done*100/max(len(d.entries), 1), 99)
 	seconds := max(time.Since(d.started).Seconds(), 0.001)
 	caption := formatBytes(uint64(float64(d.written)/seconds)) + "/с"

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 	"unicode/utf8"
 
 	"fogs/proto"
@@ -30,6 +32,7 @@ type AgentStore interface {
 	SetSavedTable(context.Context, net.HardwareAddr, []byte) error
 	ReportProgress(ctx context.Context, mac net.HardwareAddr, id int64, percent int, stage, message string) error
 	FinishTask(ctx context.Context, mac net.HardwareAddr, id int64, ok bool, message string) error
+	SaveMetrics(ctx context.Context, mac net.HardwareAddr, id int64, metrics string) error
 }
 
 // addAgentRoutes registers what the agent talks to.
@@ -114,6 +117,7 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 		if in.Stage == proto.StageFailed {
 			c.Log.Warn("agent reported an error", "mac", mac.String(), "task", id, "message", clip(in.Message), "details", in.Details)
 		}
+		saveMetrics(r.Context(), c, mac, id, in.Metrics)
 		err := c.Agent.ReportProgress(r.Context(), mac, id, in.Percent, clip(in.Stage), clip(in.Message))
 		finishReport(w, c, err)
 	})
@@ -124,6 +128,7 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 		if !ok {
 			return
 		}
+		saveMetrics(r.Context(), c, mac, id, in.Metrics)
 		err := c.Agent.FinishTask(r.Context(), mac, id, in.OK, clip(in.Message))
 		if err == nil {
 			if c.Clone != nil {
@@ -142,7 +147,7 @@ func readReport(w http.ResponseWriter, r *http.Request, in any, macOf func() str
 		http.Error(w, "bad task id", http.StatusBadRequest)
 		return 0, nil, false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	r.Body = http.MaxBytesReader(w, r.Body, maxReportBody)
 	if err := json.NewDecoder(r.Body).Decode(in); err != nil {
 		http.Error(w, "bad report", http.StatusBadRequest)
 		return 0, nil, false
@@ -189,4 +194,46 @@ func clip(s string) string {
 		return s
 	}
 	return string([]rune(s)[:maxReportText])
+}
+
+// maxReportBody bounds a report: a message, a stack and the metrics of a task.
+const maxReportBody = 32 << 10
+
+// maxMetricEntries bounds each list of the metrics; the agent sends about ten.
+const maxMetricEntries = 64
+
+// saveMetrics keeps what the agent measured for a task and writes a short line of
+// it to the log. Metrics only explain a task, so a failure here fails no report.
+func saveMetrics(ctx context.Context, c Config, mac net.HardwareAddr, id int64, m *proto.TaskMetrics) {
+	if m == nil {
+		return
+	}
+	if len(m.Steps) > maxMetricEntries || len(m.Work) > maxMetricEntries || len(m.Amounts) > maxMetricEntries {
+		c.Log.Warn("metrics refused: too many entries", "mac", mac.String(), "task", id)
+		return
+	}
+	for _, list := range [][]proto.MetricTime{m.Steps, m.Work} {
+		for i := range list {
+			list[i].Name = clip(list[i].Name)
+		}
+	}
+	for i := range m.Amounts {
+		m.Amounts[i].Name = clip(m.Amounts[i].Name)
+	}
+	data, err := json.Marshal(m)
+	if err == nil {
+		err = c.Agent.SaveMetrics(ctx, mac, id, string(data))
+	}
+	if err != nil {
+		c.Log.Warn("metrics not saved", "mac", mac.String(), "task", id, "err", err)
+		return
+	}
+	steps := make([]any, 0, 2*len(m.Steps))
+	for _, s := range m.Steps {
+		steps = append(steps, s.Name, (time.Duration(s.Ms) * time.Millisecond).String())
+	}
+	c.Log.Info("task metrics", "mac", mac.String(), "task", id,
+		"total", (time.Duration(m.TotalMs) * time.Millisecond).String(),
+		"cpu", (time.Duration(m.CPUMs) * time.Millisecond).String(), "cores", m.Cores,
+		"peakMemoryMiB", m.PeakMemory>>20, "gc", m.GCCycles, slog.Group("steps", steps...))
 }

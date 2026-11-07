@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"mime"
 	"net"
@@ -33,6 +34,7 @@ const taskHistory = 100
 type Store interface {
 	Hosts(context.Context) ([]store.Host, error)
 	RecentTasks(context.Context, int) ([]store.HostTask, error)
+	TaskMetrics(context.Context, int64) (string, error)
 	DiscoveredPCs(context.Context) ([]store.Discovered, error)
 	AddHost(context.Context, net.HardwareAddr, string) (store.Host, error)
 	RenameHost(context.Context, int64, string) error
@@ -108,6 +110,7 @@ func New(c Config) http.Handler {
 		w.Write(indexHTML)
 	})
 	mux.HandleFunc("GET /api/state", h.state)
+	mux.HandleFunc("GET /api/tasks/{id}/metrics", h.taskMetrics)
 	mux.HandleFunc("POST /api/hosts", h.addHost)
 	mux.HandleFunc("PATCH /api/hosts/{id}", h.renameHost)
 	mux.HandleFunc("DELETE /api/hosts/{id}", h.deleteHost)
@@ -363,4 +366,24 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// taskMetrics returns what the agent measured for a task, as it sent it.
+func (h *server) taskMetrics(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Неверная задача")
+		return
+	}
+	metrics, err := h.store.TaskMetrics(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) || err == nil && metrics == "" {
+		writeError(w, http.StatusNotFound, "Метрик у этой задачи нет")
+		return
+	}
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	io.WriteString(w, metrics)
 }

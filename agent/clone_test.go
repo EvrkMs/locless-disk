@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -426,6 +427,10 @@ func TestErrorsReachTheServer(t *testing.T) {
 		if tk := hosts[0].Task; tk != nil && tk.Stage == proto.StageFailed {
 			if !strings.Contains(tk.Message, "диск пропал") {
 				t.Fatalf("message: %q", tk.Message)
+			}
+			// The failure brings how far the task got.
+			if m := lastMetrics(t, e.s); !slices.Equal(names(m.Steps), []string{"Открытие диска"}) {
+				t.Fatalf("metrics of the failure: %+v", m)
 			}
 			break
 		}

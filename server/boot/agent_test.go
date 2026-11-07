@@ -147,7 +147,7 @@ func TestAgentRejectsBadReports(t *testing.T) {
 		{"bad mac", base + "/progress", proto.AgentProgress{MAC: "nope"}, http.StatusBadRequest},
 		{"bad id", "/agent/tasks/abc/finish", proto.AgentResult{MAC: mac}, http.StatusBadRequest},
 		{"another PC", base + "/finish", proto.AgentResult{MAC: "aa:bb:cc:00:00:09", OK: true}, http.StatusGone},
-		{"huge report", base + "/progress", proto.AgentProgress{MAC: mac, Message: strings.Repeat("x", 9000)}, http.StatusBadRequest},
+		{"huge report", base + "/progress", proto.AgentProgress{MAC: mac, Message: strings.Repeat("x", maxReportBody+1)}, http.StatusBadRequest},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

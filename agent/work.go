@@ -68,6 +68,7 @@ type worker struct {
 	names      []string               // stages of the current task
 	taskID     int64                  // the task being worked on, 0 before the server named one
 	failed     atomic.Bool            // the error screen is up, so a reboot cannot break anything
+	rec        *recorder              // metrics of the clone or deploy running now, nil otherwise
 }
 
 // Stages of the link check, in order.
@@ -101,6 +102,7 @@ func (w *worker) run() {
 
 // attempt does everything from waiting for the network to reporting the result.
 func (w *worker) attempt() error {
+	w.rec = nil
 	w.names = checkStages
 	w.screen.update(func(st *ui.State) {
 		st.Phase, st.Percent = ui.PhaseIdle, -1
@@ -222,7 +224,7 @@ func (w *worker) runCheck(id int64, ip string) error {
 func (w *worker) finish(id int64, ok bool, message string) error {
 	var last error
 	for range finishTries {
-		err := w.client.finish(id, ok, message)
+		err := w.client.finish(id, ok, message, w.rec.Result())
 		if err == nil || errors.Is(err, errTaskGone) {
 			return nil
 		}
@@ -297,7 +299,7 @@ func (w *worker) report(failure error) {
 	}
 	stack := recovery.StackOf(failure)
 	stack = stack[:min(len(stack), maxDetails)]
-	if err := w.client.failure(w.taskID, failure.Error(), stack); err != nil {
+	if err := w.client.failure(w.taskID, failure.Error(), stack, w.rec.Result()); err != nil {
 		w.screen.log("ошибка не доставлена на сервер: " + err.Error())
 	}
 }

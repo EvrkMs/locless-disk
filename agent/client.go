@@ -185,8 +185,8 @@ func (c *client) progress(id int64, percent int, stage, message string) error {
 }
 
 // finish ends a task.
-func (c *client) finish(id int64, ok bool, message string) error {
-	return c.post(id, "finish", proto.AgentResult{MAC: c.mac, OK: ok, Message: message})
+func (c *client) finish(id int64, ok bool, message string, m *proto.TaskMetrics) error {
+	return c.post(id, "finish", proto.AgentResult{MAC: c.mac, OK: ok, Message: message, Metrics: m})
 }
 
 func (c *client) post(id int64, action string, body any) error {
@@ -216,6 +216,6 @@ func (c *client) saveTable(table []byte) error {
 }
 
 // failure reports an error of a running task.
-func (c *client) failure(id int64, message, details string) error {
-	return c.post(id, "progress", proto.AgentProgress{MAC: c.mac, Stage: proto.StageFailed, Message: message, Details: details})
+func (c *client) failure(id int64, message, details string, m *proto.TaskMetrics) error {
+	return c.post(id, "progress", proto.AgentProgress{MAC: c.mac, Stage: proto.StageFailed, Message: message, Details: details, Metrics: m})
 }
