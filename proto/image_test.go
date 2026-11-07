@@ -203,6 +203,44 @@ func TestBlockCodec(t *testing.T) {
 	}
 }
 
+// TestEncodeHashed: a known hash must give the same stored block as EncodeBlock.
+func TestEncodeHashed(t *testing.T) {
+	raw := text(2, testBlock)
+	want, wantPayload, err := EncodeBlock(raw)
+	if err != nil {
+		t.Fatalf("EncodeBlock: %v", err)
+	}
+	got, payload, err := EncodeHashed(raw, HashBlock(raw))
+	if err != nil {
+		t.Fatalf("EncodeHashed: %v", err)
+	}
+	if got != want || !bytes.Equal(payload, wantPayload) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// TestDecodeBlockInto: the block lands in the buffer it was given, and damage is
+// found as in DecodeBlock.
+func TestDecodeBlockInto(t *testing.T) {
+	want := text(3, testBlock)
+	h, payload, err := EncodeBlock(want)
+	if err != nil {
+		t.Fatalf("EncodeBlock: %v", err)
+	}
+	buf := make([]byte, testBlock)
+	raw, err := DecodeBlockInto(buf[:0], h, payload)
+	if err != nil || !bytes.Equal(raw, want) {
+		t.Fatalf("decode: %v", err)
+	}
+	if &raw[0] != &buf[0] {
+		t.Fatal("the block did not land in the buffer")
+	}
+	h.Hash[0] ^= 0xff
+	if _, err := DecodeBlockInto(buf[:0], h, payload); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("got %v, want ErrCorrupt", err)
+	}
+}
+
 func TestDecodeRejectsDamage(t *testing.T) {
 	h, payload, err := EncodeBlock(text(1, testBlock))
 	if err != nil {

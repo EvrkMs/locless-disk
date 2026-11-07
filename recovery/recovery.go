@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// restartDelay keeps a service that crashes at once from filling the log.
-var restartDelay = time.Second
+// restartDelay keeps a service that fails at once from taking a core.
+var restartDelay = 5 * time.Second
 
 // PanicError is a panic turned into an ordinary error.
 type PanicError struct {
@@ -44,19 +44,34 @@ func StackOf(err error) string {
 	return ""
 }
 
-// Keep runs a service and starts it again after a panic, until ctx ends. An error
-// it returns on its own ends it, as the caller decides what that means.
-func Keep(ctx context.Context, log *slog.Logger, name string, serve func() error) error {
+// quietAfter is how long a service has to run before the same failure is logged
+// again: a port that stays taken must not write a line every few seconds.
+const quietAfter = time.Minute
+
+// Keep runs a service until ctx ends. Whenever it stops, on an error or a panic,
+// it starts again after a pause: a port that was taken for a while or a network
+// card that came back must not need a restart of the whole server.
+func Keep(ctx context.Context, log *slog.Logger, name string, serve func() error) {
+	last := ""
 	for {
+		started := time.Now()
 		err := Run(serve)
-		stack := StackOf(err)
-		if stack == "" {
-			return err
+		if ctx.Err() != nil {
+			return
 		}
-		log.Error("service crashed, restarting", "service", name, "err", err, "stack", stack)
+		if err == nil {
+			err = errors.New("stopped on its own")
+		}
+		if time.Since(started) > quietAfter {
+			last = ""
+		}
+		if msg := err.Error(); msg != last {
+			last = msg
+			log.Error("service failed, restarting", "service", name, "err", err, "stack", StackOf(err))
+		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case <-time.After(restartDelay):
 		}
 	}

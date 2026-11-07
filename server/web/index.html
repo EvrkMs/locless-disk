@@ -121,6 +121,7 @@ form input { flex: 1 1 180px; }
 <main>
   <div id="error" role="alert"></div>
   <div id="storage" class="alert" hidden>Папка образов недоступна. Проверьте диск и настройки, задачи с такими образами сейчас не запускаются.</div>
+  <div id="setup" class="alert" hidden></div>
 
   <div class="page" id="page-pcs">
   <h1>ПК</h1>
@@ -203,7 +204,19 @@ form input { flex: 1 1 180px; }
     <div class="field">
       <label>Каталог загрузки</label>
       <div class="value" id="rootDir"></div>
-      <p>Задаётся при запуске флагом -root. Файлы отсюда доступны всем в сети без пароля, поэтому образы здесь хранить нельзя.</p>
+      <p>Папка EFI в папке сервера. Файлы отсюда доступны всем в сети без пароля, поэтому образы здесь хранить нельзя.</p>
+    </div>
+  </section>
+  <section>
+    <div class="head"><h2>Сеть</h2></div>
+    <div class="field">
+      <label for="clientAddr">Адрес для компьютеров клуба</label>
+      <select id="clientAddr"></select>
+      <p id="clientAddrNote">По этому адресу компьютеры находят сервер при загрузке. Смена применяется сразу, но прерывает идущие задачи.</p>
+    </div>
+    <div class="field">
+      <label>Службы для компьютеров</label>
+      <div class="value" id="services"></div>
     </div>
   </section>
   </div>
@@ -635,6 +648,7 @@ async function refresh() {
     $('imageBadge').textContent = s.storageOffline ? '!' : lost;
     $('imageBadge').hidden = !lost && !s.storageOffline;
     $('storage').hidden = !s.storageOffline;
+    showServer(s.server);
     $('foundBadge').textContent = s.discovered.length;
     $('foundBadge').hidden = !s.discovered.length;
     $('dot').classList.remove('off');
@@ -645,16 +659,59 @@ async function refresh() {
   }
 }
 
+// showServer tells what keeps the PCs of the club from being served, if anything.
+function showServer(srv) {
+  const problems = [];
+  if (srv.waiting) problems.push('Компьютеры клуба не обслуживаются: ' + srv.waiting + '.');
+  for (const svc of srv.services) {
+    if (svc.error) problems.push(svc.name + ' не работает: ' + svc.error + '. Сервер пробует снова сам.');
+  }
+  if (srv.missingFiles && srv.missingFiles.length) {
+    problems.push('В папке EFI нет файлов: ' + srv.missingFiles.join(', ') + '.');
+  }
+  $('setup').replaceChildren(...problems.map(p => el('div', { textContent: p })));
+  $('setup').hidden = !problems.length;
+  const lines = srv.waiting ? [el('div', { textContent: 'не запущены' })] : srv.services.map(svc =>
+    el('div', { textContent: svc.name + ' — ' + (svc.running ? 'работает, ' + srv.addr : svc.error ? 'ошибка' : 'запускается') }));
+  $('services').replaceChildren(...lines);
+}
+
 async function loadSettings() {
   try {
     const s = await api('GET', '/api/settings');
     $('imageDir').value = s.imageDir;
     $('exitMode').value = s.exitMode;
     $('rootDir').textContent = s.root;
+    const select = $('clientAddr');
+    if (s.bind) {
+      select.replaceChildren(el('option', { value: s.bind, textContent: s.bind }));
+      select.disabled = true;
+      $('clientAddrNote').textContent = 'Задан при запуске флагом -bind.';
+      return;
+    }
+    const options = [el('option', { value: '', textContent: s.addresses.length === 1 ? '— выбирать самому (' + s.addresses[0] + ')' : '— не выбран' })];
+    for (const a of s.addresses) options.push(el('option', { value: a, textContent: a }));
+    if (s.clientAddr && !s.addresses.includes(s.clientAddr)) {
+      options.push(el('option', { value: s.clientAddr, textContent: s.clientAddr + ' (нет на этой машине)' }));
+    }
+    select.replaceChildren(...options);
+    select.value = s.clientAddr;
   } catch (e) {
     showError(e.message);
   }
 }
+
+$('clientAddr').addEventListener('change', async e => {
+  try {
+    await api('PUT', '/api/settings', { clientAddr: e.target.value });
+    showError('');
+    $('clientAddrNote').textContent = 'Сохранено';
+    $('clientAddrNote').className = 'saved';
+    refresh();
+  } catch (err) {
+    showError(err.message);
+  }
+});
 
 $('exitMode').addEventListener('change', async e => {
   try {

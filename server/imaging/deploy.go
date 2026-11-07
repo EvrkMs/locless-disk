@@ -18,6 +18,7 @@ var ErrNoImage = errors.New("imaging: image has no versions")
 // deploySession is one image being sent to one PC. The files stay open for the
 // whole deploy, so merging or deleting versions later cannot pull them away.
 type deploySession struct {
+	image   string
 	files   []*os.File
 	chain   *proto.Chain
 	entries []proto.Entry
@@ -51,11 +52,17 @@ func (m *Manager) StartDeploy(ctx context.Context, task int64, image string) (pr
 	if len(versions) == 0 {
 		return proto.DeployInfo{}, ErrNoImage
 	}
+	// Asked before the files are opened as well, or the files of a merge that is
+	// just ending could vanish under openChain.
+	if merging, _ := m.Merging(image); merging {
+		return proto.DeployInfo{}, ErrBusy
+	}
 
 	s, err := openChain(dir, versions)
 	if err != nil {
 		return proto.DeployInfo{}, err
 	}
+	s.image = image
 	index := s.chain.Index()
 	s.entries = index.Entries
 	s.active.Store(time.Now().Unix())

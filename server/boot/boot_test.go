@@ -56,7 +56,7 @@ func TestTaskBootsWinPE(t *testing.T) {
 		"kernel http://192.168.88.105:8080/files/wimboot index=1 || goto disk",
 		"initrd http://192.168.88.105:8080/winpeshl.ini winpeshl.ini || goto disk",
 		"initrd http://192.168.88.105:8080/agent/aa-bb-cc-00-00-03/fogs-agent.json fogs-agent.json || goto disk",
-		"initrd http://192.168.88.105:8080/files/agent/fogs-agent.exe fogs-agent.exe || goto disk",
+		"initrd http://192.168.88.105:8080/files/agent/partclone.exe partclone.exe || goto disk",
 		"initrd http://192.168.88.105:8080/files/WinPE/boot.wim boot.wim || goto disk",
 		"boot || goto disk",
 	} {
@@ -82,7 +82,7 @@ func TestWinpeshlStartsNetworkBeforeAgent(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
-	net, agent := strings.Index(body, "wpeinit.exe"), strings.Index(body, "fogs-agent.exe")
+	net, agent := strings.Index(body, "wpeinit.exe"), strings.Index(body, "partclone.exe")
 	if !strings.HasPrefix(body, "[LaunchApps]\r\n") || net < 0 || agent < net {
 		t.Fatalf("winpeshl.ini: %q", body)
 	}
@@ -101,7 +101,7 @@ func TestServesFiles(t *testing.T) {
 }
 
 func TestAutoexec(t *testing.T) {
-	script := string(Autoexec("192.168.88.105:8080", proto.ExitFirmware))
+	script := string(Autoexec("192.168.88.105:8080", proto.ExitFirmware, false))
 	lines := strings.Split(strings.TrimSpace(script), "\n")
 	if lines[0] != "#!ipxe" {
 		t.Fatalf("first line: %q", lines[0])
@@ -181,7 +181,7 @@ func TestLeaveModes(t *testing.T) {
 	if got := leave(proto.ExitRefind, "a:1"); got != "chain http://a:1/files/refind.efi || exit\n" {
 		t.Fatalf("refind: %q", got)
 	}
-	s := string(Autoexec("a:1", proto.ExitSanboot))
+	s := string(Autoexec("a:1", proto.ExitSanboot, false))
 	if !strings.Contains(s, ":disk\nsanboot ") {
 		t.Fatalf("autoexec: %s", s)
 	}
@@ -208,5 +208,20 @@ func TestExitModeIsReadOnEveryRequest(t *testing.T) {
 	mode = proto.ExitRefind
 	if got := request(); !strings.Contains(got, "refind.efi") {
 		t.Fatalf("script: %q", got)
+	}
+}
+
+// TestIdleAutoexecOnlyLeaves: a PC the server knows to have no task skips the
+// address and HTTP. rEFInd still needs HTTP.
+func TestIdleAutoexecOnlyLeaves(t *testing.T) {
+	s := string(Autoexec("a:1", proto.ExitSanboot, true))
+	if strings.Contains(s, "dhcp") || strings.Contains(s, "http://") || !strings.Contains(s, "\nsanboot ") {
+		t.Fatalf("idle sanboot: %s", s)
+	}
+	if s := string(Autoexec("a:1", proto.ExitFirmware, true)); strings.Contains(s, "dhcp") || !strings.HasSuffix(s, "\nexit\n") {
+		t.Fatalf("idle exit: %s", s)
+	}
+	if s := string(Autoexec("a:1", proto.ExitRefind, true)); !strings.Contains(s, "dhcp ||") {
+		t.Fatalf("idle refind: %s", s)
 	}
 }

@@ -26,7 +26,7 @@ const (
 	IPXEPath    = "ipxe.efi"
 	WimbootPath = "wimboot"
 	BootWimPath = "WinPE/boot.wim"
-	AgentPath   = "agent/fogs-agent.exe"
+	AgentPath   = "agent/partclone.exe"
 )
 
 // winpeshl replaces the WinPE shell. wpeinit has to run first: a custom
@@ -34,7 +34,7 @@ const (
 // when the last program exits.
 const winpeshl = "[LaunchApps]\r\n" +
 	"%SYSTEMROOT%\\System32\\wpeinit.exe\r\n" +
-	"%SYSTEMROOT%\\System32\\fogs-agent.exe\r\n"
+	"%SYSTEMROOT%\\System32\\partclone.exe\r\n"
 
 // Autoexec generates autoexec.ipxe for a server reachable at httpAddr.
 //
@@ -42,7 +42,14 @@ const winpeshl = "[LaunchApps]\r\n" +
 // script has to configure the network itself. Every failure ends in leaving iPXE,
 // so a network problem must not stop the PC booting
 // from disk. netX is the interface dhcp just opened.
-func Autoexec(httpAddr, exitMode string) []byte {
+//
+// idle means the server already knows this PC has nothing to do. Then the script
+// only leaves, without an address and HTTP, so the PC reaches its disk sooner.
+// rEFInd comes over HTTP, so that mode always gets the whole script.
+func Autoexec(httpAddr, exitMode string, idle bool) []byte {
+	if idle && exitMode != proto.ExitRefind {
+		return fmt.Appendf(nil, "#!ipxe\necho FOGs: no task, booting from disk\n%s", leave(exitMode, httpAddr))
+	}
 	return fmt.Appendf(nil, `#!ipxe
 echo FOGs: requesting an address
 dhcp || dhcp || goto disk
@@ -64,7 +71,7 @@ echo FOGs: loading WinPE
 kernel http://%[1]s/files/%[2]s index=1 || goto disk
 initrd http://%[1]s/winpeshl.ini winpeshl.ini || goto disk
 initrd http://%[1]s/agent/%[5]s/%[6]s %[6]s || goto disk
-initrd http://%[1]s/files/%[3]s fogs-agent.exe || goto disk
+initrd http://%[1]s/files/%[3]s partclone.exe || goto disk
 initrd http://%[1]s/files/%[4]s boot.wim || goto disk
 boot || goto disk
 :disk

@@ -2,12 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"fogs/agent/ui"
 	"fogs/proto"
+	"fogs/recovery"
 )
 
 // confirmSeconds is how long the screen warns before the disk is touched. It is
@@ -43,6 +49,9 @@ type target interface {
 	// MakeBootable adds Windows to the boot menu of the firmware, which a disk
 	// image cannot carry. It runs after Close, with the partitions back in Windows.
 	MakeBootable(m proto.Manifest) error
+	// SetName gives the Windows on the disk its computer name. It runs after
+	// MakeBootable, which mounts that Windows.
+	SetName(name string) error
 }
 
 // diskInfo is what is known about a disk before choosing one to overwrite.
@@ -170,13 +179,67 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 	if err := dst.MakeBootable(fitted); err != nil {
 		w.screen.log("загрузочная запись: " + err.Error())
 	}
-	message := fmt.Sprintf("%s v%d, записано %s", task.Image, info.Version, formatBytes(d.written))
+	message := fmt.Sprintf("%s v%d, записано %s за %s, %s", task.Image, info.Version, formatBytes(d.written),
+		formatDuration(time.Since(d.started)), w.nameWindows(dst))
 	if err := w.finish(task.ID, true, message); err != nil {
 		return err
 	}
 	w.screen.log("готово: " + message)
 	w.showResult("Готово", "Образ "+task.Image+" развёрнут")
 	return nil
+}
+
+// nameWindows gives the deployed Windows the name the PC has in the panel and says
+// how that went. Windows boots under the name of the image without it, so a failure
+// does not fail the deploy, but the panel has to show it.
+func (w *worker) nameWindows(dst target) string {
+	err := checkComputerName(w.cfg.Host)
+	if err == nil {
+		err = dst.SetName(w.cfg.Host)
+	}
+	if err != nil {
+		return "имя ПК не задано: " + err.Error()
+	}
+	return "имя ПК " + w.cfg.Host
+}
+
+// maxComputerName is the limit of a NetBIOS name, which Windows still enforces.
+const maxComputerName = 15
+
+// checkComputerName refuses what Windows would not accept as a computer name. The
+// panel allows any name, and changing it here would hide that from the operator.
+func checkComputerName(name string) error {
+	if name == "" || len(name) > maxComputerName {
+		return fmt.Errorf("%q: нужно от 1 до %d символов", name, maxComputerName)
+	}
+	digits := true
+	for _, c := range []byte(name) {
+		isDigit := c >= '0' && c <= '9'
+		digits = digits && isDigit
+		if !isDigit && c != '-' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return fmt.Errorf("%q: только латиница, цифры и дефис", name)
+		}
+	}
+	if digits || name[0] == '-' || name[len(name)-1] == '-' {
+		return fmt.Errorf("%q: не может быть из одних цифр, начинаться или кончаться дефисом", name)
+	}
+	return nil
+}
+
+// controlSet finds the control set Windows boots with in what reg query prints for
+// the value Current of the key Select.
+func controlSet(query string) (string, error) {
+	fields := strings.Fields(query)
+	for i, f := range fields[:max(len(fields)-1, 0)] {
+		if f == "REG_DWORD" {
+			n, err := strconv.ParseUint(fields[i+1], 0, 32)
+			if err != nil {
+				break
+			}
+			return fmt.Sprintf("ControlSet%03d", n), nil
+		}
+	}
+	return "", errors.New("в реестре не найден текущий ControlSet")
 }
 
 // runFormat wipes the disk into one empty volume.
@@ -309,23 +372,143 @@ func (d *deployRun) write() error {
 		}
 	}
 
+	// Every place of the list is a different one, so the order of writing is free.
+	var batches [][]uint32
 	var batch []uint32
+	zeros := make([]byte, d.info.BlockSize)
 	for i, e := range d.entries {
 		if e.Zero() {
-			if err := d.writeZero(e); err != nil {
+			if err := d.writeZero(e, zeros); err != nil {
 				return err
 			}
 			continue
 		}
 		batch = append(batch, uint32(i))
 		if len(batch) == cloneBatch {
-			if err := d.flush(batch); err != nil {
-				return err
-			}
-			batch = batch[:0]
+			batches = append(batches, batch)
+			batch = nil
 		}
 	}
-	return d.flush(batch)
+	if len(batch) > 0 {
+		batches = append(batches, batch)
+	}
+	return d.pipeline(batches)
+}
+
+// pipeline keeps the network, the processor and the disk busy at once: one batch is
+// on its way from the server while the one before it is unpacked and the one before
+// that is written. Only this goroutine writes. Nothing runs on after it returns.
+func (d *deployRun) pipeline(batches [][]uint32) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer cancel()
+
+	fetched := make(chan deployBatch, 1)
+	unpacked := make(chan deployBatch, 1)
+	free := newSlabs(d.info.BlockSize)
+	wg.Go(func() { d.fetch(ctx, batches, fetched) })
+	wg.Go(func() { d.unpack(ctx, fetched, unpacked, free) })
+
+	for b := range unpacked {
+		if b.err != nil {
+			return b.err
+		}
+		if err := d.store(b); err != nil {
+			return err
+		}
+		free <- b.slab
+	}
+	return nil
+}
+
+// deployBatch is one batch on its way through the pipeline. A stage that fails puts
+// its error here and stops, so the error arrives behind the batches before it.
+type deployBatch struct {
+	numbers []uint32
+	body    []byte   // the stored blocks, as the server sent them
+	slab    []byte   // where the blocks are unpacked to
+	raw     [][]byte // the blocks, checked and ready to write
+	err     error
+}
+
+// fetch downloads the batches one request at a time.
+func (d *deployRun) fetch(ctx context.Context, batches [][]uint32, out chan<- deployBatch) {
+	defer close(out)
+	for _, numbers := range batches {
+		b := deployBatch{numbers: numbers}
+		b.err = recovery.Run(func() (err error) { // a panic here would end the whole agent
+			b.body, err = d.w.client.deployBlocks(ctx, d.task, numbers)
+			return err
+		})
+		select {
+		case out <- b:
+		case <-ctx.Done():
+			return
+		}
+		if b.err != nil {
+			return
+		}
+	}
+}
+
+// unpack checks and unpacks each batch. It waits for a free slab, which is what
+// holds the network back when the disk is the slowest.
+func (d *deployRun) unpack(ctx context.Context, in <-chan deployBatch, out chan<- deployBatch, free <-chan []byte) {
+	defer close(out)
+	for b := range in {
+		if b.err == nil {
+			select {
+			case b.slab = <-free:
+			case <-ctx.Done():
+				return
+			}
+			b.err = recovery.Run(func() error { return d.decode(&b) })
+		}
+		select {
+		case out <- b:
+		case <-ctx.Done():
+			return
+		}
+		if b.err != nil {
+			return
+		}
+	}
+}
+
+// decode unpacks the blocks of a batch in parallel and checks each against the list.
+func (d *deployRun) decode(b *deployBatch) error {
+	b.raw = make([][]byte, len(b.numbers))
+	errs := make([]error, len(b.numbers))
+	slots := make(chan struct{}, runtime.NumCPU())
+	size := int(d.info.BlockSize)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	r := bytes.NewReader(b.body)
+	for i, n := range b.numbers {
+		e := d.entries[n]
+		h, payload, err := proto.ReadStored(r)
+		if err != nil {
+			return fmt.Errorf("сервер прислал неполные данные: %w", err)
+		}
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			errs[i] = recovery.Run(func() error { // a panic here would end the whole agent
+				raw, err := proto.DecodeBlockInto(b.slab[i*size:i*size:(i+1)*size], h, payload)
+				if err != nil {
+					return fmt.Errorf("блок %d раздела %d повреждён: %w", e.Position, e.Partition, err)
+				}
+				if h.Hash != e.Hash {
+					return fmt.Errorf("сервер прислал другой блок вместо %d раздела %d", e.Position, e.Partition)
+				}
+				b.raw[i] = raw
+				return nil
+			})
+		})
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // place returns where an entry goes and how long the block must be.
@@ -338,12 +521,12 @@ func (d *deployRun) place(e proto.DeployEntry) (uint64, uint64, error) {
 	return offset, min(uint64(d.info.BlockSize), size-offset), nil
 }
 
-func (d *deployRun) writeZero(e proto.DeployEntry) error {
+func (d *deployRun) writeZero(e proto.DeployEntry, zeros []byte) error {
 	offset, length, err := d.place(e)
 	if err != nil {
 		return err
 	}
-	if err := d.dst.WriteBlock(e.Partition, offset, make([]byte, length)); err != nil {
+	if err := d.dst.WriteBlock(e.Partition, offset, zeros[:length]); err != nil {
 		return fmt.Errorf("ошибка записи раздела %d: %w", e.Partition, err)
 	}
 	d.written += length
@@ -351,29 +534,11 @@ func (d *deployRun) writeZero(e proto.DeployEntry) error {
 	return nil
 }
 
-// flush fetches a batch, checks every block against the list, and writes it.
-func (d *deployRun) flush(batch []uint32) error {
-	if len(batch) == 0 {
-		return nil
-	}
-	body, err := d.w.client.deployBlocks(d.task, batch)
-	if err != nil {
-		return err
-	}
-	r := bytes.NewReader(body)
-	for _, n := range batch {
+// store writes the checked blocks of a batch to the disk.
+func (d *deployRun) store(b deployBatch) error {
+	for i, n := range b.numbers {
 		e := d.entries[n]
-		h, payload, err := proto.ReadStored(r)
-		if err != nil {
-			return fmt.Errorf("сервер прислал неполные данные: %w", err)
-		}
-		raw, err := proto.DecodeBlock(h, payload)
-		if err != nil {
-			return fmt.Errorf("блок %d раздела %d повреждён: %w", e.Position, e.Partition, err)
-		}
-		if h.Hash != e.Hash {
-			return fmt.Errorf("сервер прислал другой блок вместо %d раздела %d", e.Position, e.Partition)
-		}
+		raw := b.raw[i]
 		offset, length, err := d.place(e)
 		if err != nil {
 			return err
@@ -402,7 +567,7 @@ func (d *deployRun) report() error {
 		return nil
 	}
 	d.reported = time.Now()
-	err := d.w.client.progress(d.task, percent, deployStages[stageCheck], "записано "+formatBytes(d.written))
+	err := d.w.client.progress(d.task, percent, deployStages[stageCheck], "записано "+formatBytes(d.written)+", "+caption)
 	if errors.Is(err, errTaskGone) {
 		return err
 	}

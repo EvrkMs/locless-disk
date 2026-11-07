@@ -52,13 +52,18 @@ const (
 	maxWindow        = 64 // far below 65535, so block numbers stay unambiguous
 )
 
+// readErrorPause is how long the receive loop waits after a failed read.
+const readErrorPause = 50 * time.Millisecond
+
 // Server serves the files under Root.
 type Server struct {
-	Root         *os.Root                 // files are confined to this directory
-	Generated    func(name string) []byte // files built by the server, nil if not one; they win over Root
-	Timeout      time.Duration            // wait for an ACK; zero means 1s
-	Retries      int                      // resends before giving up; zero means 5
-	MaxTransfers int                      // concurrent transfers; zero means 64
+	Root *os.Root // files are confined to this directory
+	// Generated returns a file built by the server for the client asking, or nil
+	// if name is not one. Such files win over Root.
+	Generated    func(name string, client netip.Addr) []byte
+	Timeout      time.Duration // wait for an ACK; zero means 1s
+	Retries      int           // resends before giving up; zero means 5
+	MaxTransfers int           // concurrent transfers; zero means 64
 	Log          *slog.Logger
 }
 
@@ -117,7 +122,14 @@ func (s *Server) Serve(ctx context.Context, conn *net.UDPConn) error {
 				return err
 			}
 			// Windows reports ICMP errors from earlier sends here; the socket is fine.
+			// A failing card could return an error at once, every time: the pause
+			// keeps that from taking a whole core.
 			s.Log.Debug("read failed", "err", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(readErrorPause):
+			}
 			continue
 		}
 		src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
@@ -177,9 +189,9 @@ func (memoryFile) Close() error { return nil }
 
 // open resolves a client path to a generated file or a file inside Root.
 // Windows boot loaders send backslashes and often a leading separator.
-func (s *Server) open(name string) (source, int64, uint16, error) {
+func (s *Server) open(name string, client netip.Addr) (source, int64, uint16, error) {
 	name = strings.TrimLeft(strings.ReplaceAll(name, `\`, "/"), "/")
-	if data := s.generated(name); data != nil {
+	if data := s.generated(name, client); data != nil {
 		return memoryFile{bytes.NewReader(data)}, int64(len(data)), 0, nil
 	}
 	if name == "" || !filepath.IsLocal(filepath.FromSlash(name)) {
@@ -225,7 +237,7 @@ func (s *Server) transfer(ctx context.Context, local netip.Addr, client netip.Ad
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 
-	f, size, code, err := s.open(req.file)
+	f, size, code, err := s.open(req.file, client.Addr())
 	if err != nil {
 		log.Info("request refused", "err", err)
 		conn.Write(errorPacket(code, err.Error()))
@@ -403,9 +415,9 @@ func errorPacket(code uint16, msg string) []byte {
 }
 
 // generated returns a file built by the server, or nil.
-func (s *Server) generated(name string) []byte {
+func (s *Server) generated(name string, client netip.Addr) []byte {
 	if s.Generated == nil {
 		return nil
 	}
-	return s.Generated(name)
+	return s.Generated(name, client)
 }

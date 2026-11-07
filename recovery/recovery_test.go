@@ -30,22 +30,28 @@ func TestRunTurnsAPanicIntoAnError(t *testing.T) {
 	}
 }
 
-func TestKeepRestartsAfterAPanicOnly(t *testing.T) {
+// TestKeepRestartsAfterAnyFailure: a plain error must not stop the server either,
+// and the same failure goes to the log once.
+func TestKeepRestartsAfterAnyFailure(t *testing.T) {
 	restartDelay = time.Millisecond
 	var log bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
-	done := errors.New("done")
-	err := Keep(context.Background(), slog.New(slog.NewTextHandler(&log, nil)), "test", func() error {
-		if calls++; calls < 3 {
+	Keep(ctx, slog.New(slog.NewTextHandler(&log, nil)), "test", func() error {
+		switch calls++; calls {
+		case 1:
 			panic("boom")
+		case 2, 3, 4:
+			return errors.New("port is taken")
 		}
-		return done
+		cancel()
+		return nil
 	})
-	if err != done || calls != 3 {
-		t.Fatalf("err %v, calls %d", err, calls)
+	if calls != 5 {
+		t.Fatalf("calls %d", calls)
 	}
-	if !strings.Contains(log.String(), "service crashed") {
-		t.Fatalf("log: %s", log.String())
+	if n := strings.Count(log.String(), "port is taken"); n != 1 || !strings.Contains(log.String(), "boom") {
+		t.Fatalf("logged the error %d times: %s", n, log.String())
 	}
 }
 
@@ -54,9 +60,7 @@ func TestKeepStopsWithItsContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := Keep(ctx, discard, "test", func() error { panic("boom") }); err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	Keep(ctx, discard, "test", func() error { panic("boom") })
 }
 
 func TestHandlerAnswersAndLogs(t *testing.T) {

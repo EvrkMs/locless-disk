@@ -349,3 +349,37 @@ func TestServeBootRepliesToSender(t *testing.T) {
 		t.Fatalf("ServeBoot: %v", err)
 	}
 }
+
+// TestServeBootLearnsTheAddress: TFTP sees only an address, and port 4011 is where
+// the server learns which registered PC uses it. A PC that got no answer is not kept.
+func TestServeBootLearnsTheAddress(t *testing.T) {
+	server, client := listen(t), listen(t)
+	p := testProxy()
+	p.Clients = NewClients()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.ServeBoot(ctx, server) }()
+	defer func() { cancel(); <-done }()
+
+	from := client.LocalAddr().(*net.UDPAddr).AddrPort().Addr()
+	send(t, client, server, pxeRequest(MsgRequest, otherMAC))
+	send(t, client, server, pxeRequest(MsgRequest, allowedMAC))
+	receive(t, client)
+	if mac, ok := p.Clients.Lookup(from); !ok || mac.String() != allowedMAC.String() {
+		t.Fatalf("got %v, %v", mac, ok)
+	}
+}
+
+func TestClientsForget(t *testing.T) {
+	c := NewClients()
+	addr := netip.MustParseAddr("192.168.88.40")
+	now := time.Now()
+	c.remember(addr, allowedMAC, now.Add(-clientTTL-time.Second))
+	if _, ok := c.Lookup(addr); ok {
+		t.Fatal("an old address still counts")
+	}
+	c.remember(addr, otherMAC, now)
+	if mac, ok := c.Lookup(addr); !ok || mac.String() != otherMAC.String() {
+		t.Fatalf("got %v, %v", mac, ok)
+	}
+}

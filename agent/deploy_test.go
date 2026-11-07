@@ -26,6 +26,11 @@ type fakeTarget struct {
 	bootErr   error
 	grown     bool
 	formatted string
+	writeErr  error // what a write fails with after failAfter good ones
+	failAfter int
+	writes    int
+	name      string
+	nameErr   error
 }
 
 func (d *fakeTarget) Describe() string                             { return "тестовый диск" }
@@ -46,12 +51,23 @@ func (d *fakeTarget) MakeBootable(proto.Manifest) error {
 	return d.bootErr
 }
 
+func (d *fakeTarget) SetName(name string) error {
+	if !d.bootable {
+		return errors.New("name before Windows was mounted")
+	}
+	d.name = name
+	return d.nameErr
+}
+
 func (d *fakeTarget) WriteBlock(partition uint32, offset uint64, data []byte) error {
 	if !d.prepared {
 		return errors.New("write before Prepare")
 	}
 	if partition != 3 {
 		return errors.New("write to a partition without content")
+	}
+	if d.writes++; d.writeErr != nil && d.writes > d.failAfter {
+		return d.writeErr
 	}
 	d.blocks[offset] = bytes.Clone(data)
 	return nil
@@ -122,6 +138,59 @@ func TestDeployRestoresTheDisk(t *testing.T) {
 	}
 	if ok, _ := e.s.HasTask(ctx, testMAC); ok {
 		t.Fatal("the PC would boot WinPE again")
+	}
+}
+
+// TestManyBatchesSurviveThePipeline goes past the number of slabs, so every buffer is
+// used again in both directions: a block must not show through in a later one.
+func TestManyBatchesSurviveThePipeline(t *testing.T) {
+	e := newCloneEnv(t)
+	blocks := map[uint32][]byte{}
+	count := uint32(cloneBatch*(pipelineSlabs+2) + 5)
+	for pos := range count {
+		switch {
+		case pos%37 == 5: // free space, which takes no place in a slab
+		case pos%37 == 9:
+			blocks[pos] = make([]byte, testBlock)
+		default:
+			blocks[pos] = fill(byte(pos), testBlock)
+		}
+	}
+	blocks[count-1] = fill(77, 4096) // the short last block
+	size := uint64(count-1)*testBlock + 4096
+	e.run(t, &fakeDisk{blocks: blocks, size: size})
+
+	d := &fakeTarget{blocks: map[uint64][]byte{}}
+	if _, err := e.deploy(t, d); err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if len(d.blocks) != len(blocks) {
+		t.Fatalf("%d blocks written, want %d", len(d.blocks), len(blocks))
+	}
+	for pos, raw := range blocks {
+		if !bytes.Equal(d.blocks[uint64(pos)*testBlock], raw) {
+			t.Fatalf("block %d differs", pos)
+		}
+	}
+}
+
+// TestWriteErrorStopsThePipeline: the batches already on their way must not hold the
+// error up, and the task must not end as done.
+func TestWriteErrorStopsThePipeline(t *testing.T) {
+	e := newCloneEnv(t)
+	blocks := map[uint32][]byte{}
+	for pos := range uint32(cloneBatch * (pipelineSlabs + 3)) {
+		blocks[pos] = fill(byte(pos), testBlock)
+	}
+	e.run(t, &fakeDisk{blocks: blocks, size: uint64(len(blocks)) * testBlock})
+
+	d := &fakeTarget{blocks: map[uint64][]byte{}, writeErr: errors.New("диск отвалился"), failAfter: cloneBatch + 1}
+	_, err := e.deploy(t, d)
+	if err == nil || !strings.Contains(err.Error(), "диск отвалился") {
+		t.Fatalf("got %v", err)
+	}
+	if d.writes != cloneBatch+2 || d.finished {
+		t.Fatalf("writes %d, finished %v", d.writes, d.finished)
 	}
 }
 
@@ -229,6 +298,71 @@ func TestBootEntryFailureIsNotADeployFailure(t *testing.T) {
 	st := w.screen.snapshot()
 	if st.Title != "Готово" || !strings.Contains(strings.Join(st.Log, "\n"), "нет прав") {
 		t.Fatalf("screen: %+v", st)
+	}
+}
+
+// TestDeployNamesThePC: Windows gets the name from the panel, and the panel is told.
+func TestDeployNamesThePC(t *testing.T) {
+	e := newCloneEnv(t)
+	e.run(t, &fakeDisk{blocks: map[uint32][]byte{0: fill(1, testBlock)}, size: testBlock})
+	d := &fakeTarget{blocks: map[uint64][]byte{}}
+	if _, err := e.deploy(t, d); err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	if d.name != "PC-12" {
+		t.Fatalf("name %q", d.name)
+	}
+	hosts, _ := e.s.Hosts(context.Background())
+	if last := hosts[0].LastTask; last == nil || !strings.Contains(last.Message, "имя ПК PC-12") {
+		t.Fatalf("last task: %+v", last)
+	}
+}
+
+// TestNameFailureIsNotADeployFailure: the data is on the disk, and the panel shows
+// what is left to do by hand.
+func TestNameFailureIsNotADeployFailure(t *testing.T) {
+	e := newCloneEnv(t)
+	e.run(t, &fakeDisk{blocks: map[uint32][]byte{0: fill(1, testBlock)}, size: testBlock})
+	d := &fakeTarget{blocks: map[uint64][]byte{}, nameErr: errors.New("reg load: нет прав")}
+	if _, err := e.deploy(t, d); err != nil {
+		t.Fatalf("attempt: %v", err)
+	}
+	hosts, _ := e.s.Hosts(context.Background())
+	last := hosts[0].LastTask
+	if last == nil || last.Status != store.StatusDone || !strings.Contains(last.Message, "имя ПК не задано: reg load") {
+		t.Fatalf("last task: %+v", last)
+	}
+}
+
+func TestCheckComputerName(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"PC-18":            true,
+		"a":                true,
+		"PC-123456789012":  true, // 15 characters
+		"":                 false,
+		"PC-1234567890123": false, // 16 characters
+		"PC 18":            false,
+		"ПК-18":            false,
+		"PC_18":            false,
+		"12345":            false,
+		"-PC":              false,
+		"PC-":              false,
+	} {
+		if err := checkComputerName(name); (err == nil) != ok {
+			t.Errorf("%q: %v", name, err)
+		}
+	}
+}
+
+func TestControlSet(t *testing.T) {
+	got, err := controlSet("\r\nHKEY_LOCAL_MACHINE\\LOCLESS\\Select\r\n    Current    REG_DWORD    0x2\r\n\r\n")
+	if err != nil || got != "ControlSet002" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	for _, bad := range []string{"", "REG_DWORD", "Current REG_DWORD zero"} {
+		if got, err := controlSet(bad); err == nil {
+			t.Errorf("%q: got %q", bad, got)
+		}
 	}
 }
 

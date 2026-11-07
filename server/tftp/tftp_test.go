@@ -9,8 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,7 +38,7 @@ func startServerWith(t *testing.T, dir string, generated map[string][]byte) *net
 	}
 	s := &Server{
 		Root:      root,
-		Generated: func(name string) []byte { return generated[name] },
+		Generated: func(name string, _ netip.Addr) []byte { return generated[name] },
 		Timeout:   50 * time.Millisecond,
 		Retries:   3,
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -329,6 +331,12 @@ func TestPaths(t *testing.T) {
 		})
 	}
 
+	// Windows refuses a drive path outright. Elsewhere the leading slash goes and
+	// the rest is looked up inside the root, where there is no such file.
+	absolute := uint16(errAccess)
+	if runtime.GOOS != "windows" {
+		absolute = errNotFound
+	}
 	refused := []struct {
 		name string
 		code uint16
@@ -339,7 +347,7 @@ func TestPaths(t *testing.T) {
 		{"../secret", errAccess},
 		{`..\secret`, errAccess},
 		{"efi/../../secret", errAccess},
-		{filepath.Join(outer, "secret"), errAccess},
+		{filepath.Join(outer, "secret"), absolute},
 	}
 	for _, tc := range refused {
 		t.Run("refused "+tc.name, func(t *testing.T) {
@@ -419,5 +427,24 @@ func TestRefusesBadRequests(t *testing.T) {
 			c.send(tc.b)
 			c.wantError(errIllegal)
 		})
+	}
+}
+
+// TestGeneratedFileKnowsTheClient: the script can depend on which PC asks.
+func TestGeneratedFileKnowsTheClient(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	s := &Server{Root: root, Generated: func(name string, client netip.Addr) []byte {
+		return []byte(client.String())
+	}}
+	f, _, _, err := s.open("autoexec.ipxe", netip.MustParseAddr("192.168.88.40"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	got := make([]byte, 13)
+	if n, _ := f.ReadAt(got, 0); string(got[:n]) != "192.168.88.40" {
+		t.Fatalf("got %q", got[:n])
 	}
 }

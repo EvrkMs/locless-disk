@@ -471,13 +471,56 @@ func (w *writeDisk) Finish() error {
 	return w.disk.Sync()
 }
 
+// windowsLetter is where MakeBootable mounts the Windows partition.
+const windowsLetter = "W"
+
+// SetName writes the computer name into the registry of the Windows on the disk,
+// through the letter MakeBootable gave it. Like MakeBootable it acts only inside WinPE.
+func (w *writeDisk) SetName(name string) (err error) {
+	if !strings.EqualFold(os.Getenv("SystemDrive"), "X:") {
+		return nil
+	}
+	const hive = `HKLM\LOCLESS`
+	if err := runReg("load", hive, windowsLetter+`:\Windows\System32\config\SYSTEM`); err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, runReg("unload", hive)) }()
+
+	out, err := exec.Command("reg", "query", hive+`\Select`, "/v", "Current").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("reg query: %w: %s", err, lastLine(out))
+	}
+	set, err := controlSet(string(out))
+	if err != nil {
+		return err
+	}
+	for _, v := range [][2]string{
+		{`Control\ComputerName\ComputerName`, "ComputerName"},
+		{`Services\Tcpip\Parameters`, "Hostname"},
+		{`Services\Tcpip\Parameters`, "NV Hostname"},
+	} {
+		if err := runReg("add", hive+`\`+set+`\`+v[0], "/v", v[1], "/t", "REG_SZ", "/d", name, "/f"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runReg(args ...string) error {
+	out, err := exec.Command("reg", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("reg %s: %w: %s", args[0], err, lastLine(out))
+	}
+	return nil
+}
+
 // MakeBootable runs bcdboot, which adds Windows Boot Manager to the firmware. It
 // acts only inside WinPE: on a working Windows it would change that PC's boot.
 func (w *writeDisk) MakeBootable(m proto.Manifest) error {
 	if !strings.EqualFold(os.Getenv("SystemDrive"), "X:") {
 		return nil
 	}
-	const windows, efi = "W", "S"
+	const windows, efi = windowsLetter, "S"
 	var script []string
 	script = append(script, fmt.Sprintf("select disk %d", w.number), "rescan")
 	found := 0

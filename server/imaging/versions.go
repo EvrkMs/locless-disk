@@ -159,7 +159,14 @@ func (m *Manager) StartMerge(ctx context.Context, image string) error {
 	}
 	for _, s := range m.sessions {
 		if s.image == image {
-			return ErrBusy
+			return ErrInUse
+		}
+	}
+	// A deploy holds the files open, and Windows does not remove an open file: the
+	// old versions would stay on the disk with nothing pointing at them.
+	for _, d := range m.deploys {
+		if d.image == image {
+			return ErrInUse
 		}
 	}
 	m.merging[image] = true

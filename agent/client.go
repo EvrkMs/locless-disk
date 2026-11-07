@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,13 +78,23 @@ func (c *client) deployList(id int64) ([]proto.DeployEntry, error) {
 }
 
 // deployBlocks fetches stored blocks by their numbers in the list.
-func (c *client) deployBlocks(id int64, numbers []uint32) ([]byte, error) {
-	return c.post2(c.deployURL(id, "blocks"), "application/octet-stream", proto.AppendNumbers(nil, numbers))
+func (c *client) deployBlocks(ctx context.Context, id int64, numbers []uint32) ([]byte, error) {
+	return c.postContext(ctx, c.deployURL(id, "blocks"), "application/octet-stream", proto.AppendNumbers(nil, numbers))
 }
 
 // post2 sends a request for image data and returns the answer.
 func (c *client) post2(url, contentType string, body []byte) ([]byte, error) {
-	res, err := c.bulk.Post(url, contentType, bytes.NewReader(body))
+	return c.postContext(context.Background(), url, contentType, body)
+}
+
+// postContext is post2 for a request that may have to be dropped halfway.
+func (c *client) postContext(ctx context.Context, url, contentType string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	res, err := c.bulk.Do(req)
 	if err != nil {
 		return nil, err
 	}

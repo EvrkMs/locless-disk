@@ -112,6 +112,8 @@ const (
 	SettingImageDir = "image_dir"
 	// SettingExitMode is how a PC leaves iPXE, see proto.ExitSanboot.
 	SettingExitMode = "exit_mode"
+	// SettingClientAddr is the address of this server that PCs of the club use.
+	SettingClientAddr = "client_addr"
 )
 
 // Store is an open database.

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"time"
 )
 
 // Ports used by proxyDHCP.
@@ -16,6 +17,9 @@ const (
 	ClientPort = 68
 	BootPort   = 4011
 )
+
+// readErrorPause is how long a receive loop waits after a failed read.
+const readErrorPause = 50 * time.Millisecond
 
 // Client architectures from option 93 (RFC 4578) that we can boot.
 const (
@@ -38,6 +42,7 @@ type Proxy struct {
 	Allow     func(net.HardwareAddr) bool   // nil refuses everyone
 	Seen      func(net.HardwareAddr)        // called for every UEFI PXE client; may be nil
 	Broadcast netip.AddrPort                // zero value means 255.255.255.255:68
+	Clients   *Clients                      // learns where answered PCs ask from; may be nil
 	Log       *slog.Logger
 }
 
@@ -128,16 +133,25 @@ func (p *Proxy) ServeDHCP(ctx context.Context, conn *net.UDPConn) error {
 	if !dst.IsValid() {
 		dst = netip.AddrPortFrom(netip.AddrFrom4([4]byte{255, 255, 255, 255}), ClientPort)
 	}
-	return p.serve(ctx, conn, p.Offer, func(netip.AddrPort) netip.AddrPort { return dst })
+	offer := func(req *Packet, _ netip.AddrPort) *Packet { return p.Offer(req) }
+	return p.serve(ctx, conn, offer, func(netip.AddrPort) netip.AddrPort { return dst })
 }
 
-// ServeBoot answers requests on a socket bound to port 4011 until ctx ends.
+// ServeBoot answers requests on a socket bound to port 4011 until ctx ends. The
+// firmware already has its address here, so this is where Clients learns it.
 func (p *Proxy) ServeBoot(ctx context.Context, conn *net.UDPConn) error {
-	return p.serve(ctx, conn, p.Ack, func(src netip.AddrPort) netip.AddrPort { return src })
+	ack := func(req *Packet, src netip.AddrPort) *Packet {
+		r := p.Ack(req)
+		if r != nil && p.Clients != nil {
+			p.Clients.remember(src.Addr(), req.MAC(), time.Now())
+		}
+		return r
+	}
+	return p.serve(ctx, conn, ack, func(src netip.AddrPort) netip.AddrPort { return src })
 }
 
 // serve is the receive loop shared by both ports.
-func (p *Proxy) serve(ctx context.Context, conn *net.UDPConn, answer func(*Packet) *Packet, dest func(netip.AddrPort) netip.AddrPort) error {
+func (p *Proxy) serve(ctx context.Context, conn *net.UDPConn, answer func(*Packet, netip.AddrPort) *Packet, dest func(netip.AddrPort) netip.AddrPort) error {
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 
@@ -152,7 +166,14 @@ func (p *Proxy) serve(ctx context.Context, conn *net.UDPConn, answer func(*Packe
 				return err
 			}
 			// Windows reports ICMP errors from earlier sends here; the socket is fine.
+			// A failing card could return an error at once, every time: the pause
+			// keeps that from taking a whole core.
 			p.Log.Debug("read failed", "err", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(readErrorPause):
+			}
 			continue
 		}
 		req, err := Parse(buf[:n])
@@ -160,7 +181,8 @@ func (p *Proxy) serve(ctx context.Context, conn *net.UDPConn, answer func(*Packe
 			p.Log.Debug("dropping bad packet", "src", src, "err", err)
 			continue
 		}
-		r := answer(req)
+		src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
+		r := answer(req, src)
 		if r == nil {
 			continue
 		}
@@ -169,7 +191,6 @@ func (p *Proxy) serve(ctx context.Context, conn *net.UDPConn, answer func(*Packe
 			p.Log.Error("cannot encode reply", "err", err)
 			continue
 		}
-		src = netip.AddrPortFrom(src.Addr().Unmap(), src.Port())
 		if _, err := conn.WriteToUDPAddrPort(b, dest(src)); err != nil {
 			p.Log.Warn("cannot send reply", "err", err)
 		}

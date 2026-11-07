@@ -162,6 +162,8 @@ func (h *server) versionResult(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "Цепочка версий нарушена: файлы не подходят друг к другу или пропали")
 	case errors.Is(err, imaging.ErrNothingToMerge):
 		writeError(w, http.StatusConflict, "Сливать нечего: в цепочке одна версия")
+	case errors.Is(err, imaging.ErrInUse):
+		writeError(w, http.StatusConflict, "С образом ещё работает компьютер. Если задачу отменили, сервер отпустит образ в течение минуты")
 	case errors.Is(err, imaging.ErrBusy):
 		writeError(w, http.StatusConflict, "Образ сейчас занят")
 	default:

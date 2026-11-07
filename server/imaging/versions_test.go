@@ -3,6 +3,7 @@ package imaging
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -280,4 +281,104 @@ func TestDeploysRunTogether(t *testing.T) {
 		}
 		defer m.Abort(id)
 	}
+}
+
+// TestMergeWaitsForDeploys: a deploy holds the files of the chain open, and Windows
+// would not let the merge remove them.
+func TestMergeWaitsForDeploys(t *testing.T) {
+	m, _, dir := setup(t)
+	_, _, v3 := threeVersions(t, m)
+	if _, err := m.StartDeploy(ctx, 10, "win11"); err != nil {
+		t.Fatalf("StartDeploy: %v", err)
+	}
+	if err := m.StartMerge(ctx, "win11"); !errors.Is(err, ErrInUse) {
+		t.Fatalf("merge during a deploy: %v", err)
+	}
+	m.Abort(10)
+	if err := m.StartMerge(ctx, "win11"); err != nil {
+		t.Fatalf("StartMerge: %v", err)
+	}
+	waitMerge(t, m)
+	entries, _ := os.ReadDir(filepath.Join(dir, "win11"))
+	if len(entries) != 1 {
+		t.Fatalf("files left: %v", entries)
+	}
+	sameDisk(t, disk(t, testChain(t, dir, entries[0].Name())), v3)
+}
+
+// TestMergeWaitsForClones: a clone builds on the newest version, which a merge
+// replaces.
+func TestMergeWaitsForClones(t *testing.T) {
+	m, _, _ := setup(t)
+	threeVersions(t, m)
+	if _, err := m.Start(ctx, 10, "win11", mac); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Abort(10)
+	if err := m.StartMerge(ctx, "win11"); !errors.Is(err, ErrInUse) {
+		t.Fatalf("merge during a clone: %v", err)
+	}
+}
+
+// TestNothingStartsDuringAMerge: a deploy and a clone wait for the merge to end.
+func TestNothingStartsDuringAMerge(t *testing.T) {
+	m, s, _ := setup(t)
+	threeVersions(t, m)
+	task, _ := openTask(t, s, 1, store.TaskClone)
+	m.mu.Lock()
+	m.merging["win11"] = true
+	m.mu.Unlock()
+	if _, err := m.StartDeploy(ctx, 10, "win11"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("deploy during a merge: %v", err)
+	}
+	if err := m.Claim(ctx, task.ID, "win11"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("clone during a merge: %v", err)
+	}
+	m.mu.Lock()
+	delete(m.merging, "win11")
+	m.mu.Unlock()
+	if _, err := m.StartDeploy(ctx, 10, "win11"); err != nil {
+		t.Fatalf("deploy after the merge: %v", err)
+	}
+	m.Abort(10)
+}
+
+// TestEndedTaskFreesTheImage: a cancelled task lets go of the image without waiting
+// for its agent, which may never ask again.
+func TestEndedTaskFreesTheImage(t *testing.T) {
+	m, s, _ := setup(t)
+	threeVersions(t, m)
+	deploy, _ := openTask(t, s, 1, store.TaskDeploy)
+	clone, _ := openTask(t, s, 2, store.TaskClone)
+	if _, err := m.StartDeploy(ctx, deploy.ID, "win11"); err != nil {
+		t.Fatalf("StartDeploy: %v", err)
+	}
+	if _, err := m.Start(ctx, clone.ID, "other", mac); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	m.dropEnded(ctx)
+	if err := m.DeployList(deploy.ID, io.Discard); err != nil {
+		t.Fatalf("an open task was dropped: %v", err)
+	}
+
+	hosts, err := s.Hosts(ctx)
+	if err != nil {
+		t.Fatalf("Hosts: %v", err)
+	}
+	for _, h := range hosts {
+		if err := s.CancelTask(ctx, h.ID); err != nil {
+			t.Fatalf("CancelTask: %v", err)
+		}
+	}
+	m.dropEnded(ctx)
+	if err := m.DeployList(deploy.ID, io.Discard); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("deploy of a cancelled task: %v", err)
+	}
+	if _, err := m.Check(clone.ID, nil); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("clone of a cancelled task: %v", err)
+	}
+	if err := m.StartMerge(ctx, "win11"); err != nil {
+		t.Fatalf("StartMerge: %v", err)
+	}
+	waitMerge(t, m)
 }

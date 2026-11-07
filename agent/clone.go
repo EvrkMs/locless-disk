@@ -16,6 +16,21 @@ import (
 // in WinPE, which lives in RAM, and what a lost request costs.
 const cloneBatch = 32
 
+// pipelineSlabs is how many batches of raw blocks a clone or a deploy holds at once:
+// one for each stage that works on them, and one waiting in between.
+const pipelineSlabs = 3
+
+// newSlabs returns the buffers of a pipeline, each with room for a whole batch. They
+// go round instead of a new buffer for every block, and a stage with none free waits,
+// so a slow disk or network cannot fill the memory of WinPE.
+func newSlabs(blockSize uint32) chan []byte {
+	free := make(chan []byte, pipelineSlabs)
+	for range pipelineSlabs {
+		free <- make([]byte, cloneBatch*int(blockSize))
+	}
+	return free
+}
+
 // reportEvery limits progress reports; a clone makes many batches a second.
 const reportEvery = 2 * time.Second
 
@@ -240,10 +255,20 @@ type cloneRun struct {
 	done      uint64
 	read      uint64 // bytes taken from the disk
 	sent      uint64 // bytes put on the wire
-	batch     []pending
 }
 
-// readDisk walks every stored partition block by block.
+// readBatch is what the disk gave for one round. An error ends the reading and
+// arrives behind the batches before it.
+type readBatch struct {
+	blocks []pending
+	slab   []byte // holds the raw data of the blocks
+	read   uint64 // bytes taken from the disk
+	err    error
+}
+
+// readDisk sends every stored partition, reading the next batch from the disk while
+// the current one is on its way. The reading has ended by the time this returns: the
+// volume gets its size back right after, and nothing may touch the disk meanwhile.
 func (c *cloneRun) readDisk() error {
 	m := c.src.Manifest()
 	for _, p := range m.Partitions {
@@ -251,44 +276,112 @@ func (c *cloneRun) readDisk() error {
 			c.total += c.src.UsedBlocks(p.Number, c.blockSize)
 		}
 	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer close(stop)
+
+	batches := make(chan readBatch, 1)
+	free := newSlabs(c.blockSize)
+	r := diskReader{c: c, stop: stop, out: batches, free: free}
+	wg.Go(func() {
+		defer close(batches)
+		// A panic here would end the whole agent with the volume shrunk.
+		err := recovery.Run(func() error { return r.run(m) })
+		if err != nil && !errors.Is(err, errReadStopped) {
+			select {
+			case batches <- readBatch{err: err}:
+			case <-stop:
+			}
+		}
+	})
+
+	for b := range batches {
+		if b.err != nil {
+			return b.err
+		}
+		if err := c.flush(b); err != nil {
+			return err
+		}
+		free <- b.slab
+	}
+	return nil
+}
+
+// errReadStopped means nobody wants the batches any more.
+var errReadStopped = errors.New("чтение диска остановлено")
+
+// diskReader walks the partitions block by block on a goroutine of its own.
+type diskReader struct {
+	c     *cloneRun
+	stop  <-chan struct{}
+	out   chan<- readBatch
+	free  <-chan []byte
+	batch readBatch
+}
+
+func (r *diskReader) run(m proto.Manifest) error {
 	for _, p := range m.Partitions {
 		if p.Content != proto.ContentBlocks {
 			continue
 		}
-		c.w.screen.log(fmt.Sprintf("раздел %d: %s", p.Number, formatBytes(p.Size)))
-		if err := c.readPartition(p); err != nil {
+		r.c.w.screen.log(fmt.Sprintf("раздел %d: %s", p.Number, formatBytes(p.Size)))
+		if err := r.readPartition(p); err != nil {
 			return err
 		}
 	}
-	return c.flush()
+	if len(r.batch.blocks) == 0 {
+		return nil
+	}
+	return r.send()
 }
 
-func (c *cloneRun) readPartition(p proto.Partition) error {
-	size := uint64(c.blockSize)
+func (r *diskReader) readPartition(p proto.Partition) error {
+	size := uint64(r.c.blockSize)
 	for offset := uint64(0); offset < p.Size; offset += size {
-		raw := make([]byte, min(size, p.Size-offset))
-		used, err := c.src.ReadBlock(p.Number, offset, raw)
+		if r.batch.slab == nil {
+			select {
+			case r.batch.slab = <-r.free:
+			case <-r.stop:
+				return errReadStopped
+			}
+		}
+		start := uint64(len(r.batch.blocks)) * size
+		raw := r.batch.slab[start : start+min(size, p.Size-offset)]
+		used, err := r.c.src.ReadBlock(p.Number, offset, raw)
 		if err != nil {
 			return fmt.Errorf("ошибка чтения раздела %d: %w", p.Number, err)
 		}
 		if !used {
 			continue
 		}
-		block := pending{p.Number, uint32(offset / size), raw, proto.HashBlock(raw)}
-		if isEmpty(raw) {
-			// Used and all zeros: deploy must overwrite this place, so it stays in the
-			// index as a zero entry, with no data.
-			block.raw, block.hash = nil, proto.Sum{}
+		// Used and all zeros: deploy must overwrite this place, so it stays in the
+		// index as a zero entry, with no data.
+		block := pending{partition: p.Number, position: uint32(offset / size)}
+		if !isEmpty(raw) {
+			block.raw, block.hash = raw, proto.HashBlock(raw)
 		}
-		c.batch = append(c.batch, block)
-		c.read += uint64(len(raw))
-		if len(c.batch) == cloneBatch {
-			if err := c.flush(); err != nil {
+		r.batch.blocks = append(r.batch.blocks, block)
+		r.batch.read += uint64(len(raw))
+		if len(r.batch.blocks) == cloneBatch {
+			if err := r.send(); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// send hands the batch over and starts a new one.
+func (r *diskReader) send() error {
+	select {
+	case r.out <- r.batch:
+		r.batch = readBatch{}
+		return nil
+	case <-r.stop:
+		return errReadStopped
+	}
 }
 
 func isEmpty(b []byte) bool {
@@ -301,39 +394,37 @@ func isEmpty(b []byte) bool {
 }
 
 // flush sends a batch: first hashes, then only the blocks the server lacks.
-func (c *cloneRun) flush() error {
-	if len(c.batch) == 0 {
-		return nil
-	}
-	hashes := make([]proto.Sum, len(c.batch))
-	for i, b := range c.batch {
+func (c *cloneRun) flush(batch readBatch) error {
+	hashes := make([]proto.Sum, len(batch.blocks))
+	for i, b := range batch.blocks {
 		hashes[i] = b.hash
 	}
 	missing, err := c.w.client.cloneCheck(c.task, hashes)
 	if err != nil {
 		return err
 	}
-	body, err := c.encode(missing)
+	body, err := c.encode(batch.blocks, missing)
 	if err != nil {
 		return err
 	}
 	if err := c.w.client.clonePut(c.task, body); err != nil {
 		return err
 	}
+	c.read += batch.read
 	c.sent += uint64(len(body))
-	c.done += uint64(len(c.batch))
-	c.batch = c.batch[:0]
+	c.done += uint64(len(batch.blocks))
 	return c.report()
 }
 
-// encode compresses the missing blocks in parallel and builds the request.
-func (c *cloneRun) encode(missing []byte) ([]byte, error) {
-	records := make([]proto.PutRecord, len(c.batch))
-	errs := make([]error, len(c.batch))
+// encode compresses the missing blocks in parallel and builds the request. The
+// request holds its own copy of everything, so the blocks are free afterwards.
+func (c *cloneRun) encode(blocks []pending, missing []byte) ([]byte, error) {
+	records := make([]proto.PutRecord, len(blocks))
+	errs := make([]error, len(blocks))
 	slots := make(chan struct{}, runtime.NumCPU())
 	var wg sync.WaitGroup
 	seen := map[proto.Sum]bool{}
-	for i, b := range c.batch {
+	for i, b := range blocks {
 		records[i] = proto.PutRecord{Partition: b.partition, Position: b.position, Hash: b.hash}
 		if b.raw == nil || missing[i] == 0 || seen[b.hash] {
 			continue // equal blocks in one batch travel once
@@ -345,7 +436,7 @@ func (c *cloneRun) encode(missing []byte) ([]byte, error) {
 			defer wg.Done()
 			defer func() { <-slots }()
 			errs[i] = recovery.Run(func() error { // a panic here would end the whole agent
-				h, payload, err := proto.EncodeBlock(b.raw)
+				h, payload, err := proto.EncodeHashed(b.raw, b.hash)
 				records[i].Block, records[i].Payload = &h, payload
 				return err
 			})
@@ -377,7 +468,7 @@ func (c *cloneRun) report() error {
 		return nil
 	}
 	c.reported = time.Now()
-	message := fmt.Sprintf("прочитано %s, отправлено %s", formatBytes(c.read), formatBytes(c.sent))
+	message := fmt.Sprintf("прочитано %s, отправлено %s, %s", formatBytes(c.read), formatBytes(c.sent), caption)
 	err := c.w.client.progress(c.task, percent, cloneStages[stageCheck], message)
 	if errors.Is(err, errTaskGone) {
 		return err
@@ -398,4 +489,13 @@ func formatBytes(n uint64) string {
 		return fmt.Sprintf("%.0f МБ", float64(n)/(unit*unit))
 	}
 	return fmt.Sprintf("%d КБ", n/unit)
+}
+
+// formatDuration shows how long a task took, to the second.
+func formatDuration(d time.Duration) string {
+	s := int(d.Round(time.Second).Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%d с", s)
+	}
+	return fmt.Sprintf("%d мин %d с", s/60, s%60)
 }

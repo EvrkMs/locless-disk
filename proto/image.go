@@ -260,7 +260,8 @@ func codecs() (*zstd.Encoder, *zstd.Decoder, error) {
 		if errCodec != nil {
 			return
 		}
-		decoder, errCodec = zstd.NewReader(nil, zstd.WithDecoderMaxMemory(2*MaxBlockSize))
+		// Without the concurrency option DecodeAll runs on four cores at most.
+		decoder, errCodec = zstd.NewReader(nil, zstd.WithDecoderMaxMemory(2*MaxBlockSize), zstd.WithDecoderConcurrency(0))
 	})
 	return encoder, decoder, errCodec
 }
@@ -270,11 +271,16 @@ func HashBlock(raw []byte) Sum { return sha256.Sum256(raw) }
 
 // EncodeBlock compresses a block. Data that does not shrink is stored as it is.
 func EncodeBlock(raw []byte) (BlockHeader, []byte, error) {
+	return EncodeHashed(raw, HashBlock(raw))
+}
+
+// EncodeHashed is EncodeBlock for a caller that already has the hash of raw.
+func EncodeHashed(raw []byte, hash Sum) (BlockHeader, []byte, error) {
 	enc, _, err := codecs()
 	if err != nil {
 		return BlockHeader{}, nil, err
 	}
-	h := BlockHeader{Raw: uint32(len(raw)), Codec: CodecZstd, Hash: HashBlock(raw)}
+	h := BlockHeader{Raw: uint32(len(raw)), Codec: CodecZstd, Hash: hash}
 	payload := enc.EncodeAll(raw, make([]byte, 0, len(raw)/2))
 	if len(payload) >= len(raw) {
 		h.Codec, payload = CodecNone, raw
@@ -286,6 +292,12 @@ func EncodeBlock(raw []byte) (BlockHeader, []byte, error) {
 
 // DecodeBlock verifies a stored block and returns its raw data.
 func DecodeBlock(h BlockHeader, payload []byte) ([]byte, error) {
+	return DecodeBlockInto(nil, h, payload)
+}
+
+// DecodeBlockInto is DecodeBlock that unpacks into dst, an empty slice with room for
+// the block, instead of a new one. A block stored as it is stays in payload.
+func DecodeBlockInto(dst []byte, h BlockHeader, payload []byte) ([]byte, error) {
 	if err := h.Verify(payload); err != nil {
 		return nil, err
 	}
@@ -301,7 +313,10 @@ func DecodeBlock(h BlockHeader, payload []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if raw, err = dec.DecodeAll(payload, make([]byte, 0, h.Raw)); err != nil {
+		if dst == nil {
+			dst = make([]byte, 0, h.Raw)
+		}
+		if raw, err = dec.DecodeAll(payload, dst); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
 		}
 	default:
@@ -583,6 +598,8 @@ type File struct {
 	Index  *Index
 	Sum    Sum // index checksum
 	r      io.ReaderAt
+
+	indexOffset uint64 // where the blocks end
 }
 
 // OpenFile reads and verifies the header, footer and index of a file.
@@ -628,12 +645,15 @@ func OpenFile(r io.ReaderAt, size int64) (*File, error) {
 	if err := x.Manifest.Validate(); err != nil {
 		return nil, err
 	}
-	return &File{Header: h, Index: x, Sum: sum, r: r}, nil
+	return &File{Header: h, Index: x, Sum: sum, r: r, indexOffset: offset}, nil
 }
 
 // Chain is a verified sequence of files ending in the version to read.
 type Chain struct {
 	files []*File
+
+	endsOnce sync.Once
+	ends     []map[uint64]uint64 // see blockEnds
 }
 
 // NewChain checks that files, from the .ldisk to the wanted version, belong
@@ -687,22 +707,75 @@ func (c *Chain) Stored(e Entry) (BlockHeader, []byte, error) {
 		return BlockHeader{}, nil, fmt.Errorf("%w: entry points past the chain", ErrCorrupt)
 	}
 	r := c.files[e.Level].r
+	// A stored block is never larger than a raw one, so a block that ends close
+	// enough is read with its header at once. A longer gap holds blocks the index
+	// no longer uses, and reading them would cost more than a second read.
+	if end := c.blockEnds()[e.Level][e.Offset]; end > e.Offset+BlockHeaderSize && end-e.Offset <= BlockHeaderSize+uint64(c.BlockSize()) {
+		b := make([]byte, end-e.Offset)
+		if _, err := r.ReadAt(b, int64(e.Offset)); err != nil {
+			return BlockHeader{}, nil, err
+		}
+		h, err := c.checkStored(e, b[:BlockHeaderSize])
+		if err != nil {
+			return BlockHeader{}, nil, err
+		}
+		if uint64(h.Stored) > uint64(len(b)-BlockHeaderSize) {
+			return BlockHeader{}, nil, fmt.Errorf("%w: block runs into the next one", ErrCorrupt)
+		}
+		return h, b[BlockHeaderSize : BlockHeaderSize+h.Stored], nil
+	}
 	hb := make([]byte, BlockHeaderSize)
 	if _, err := r.ReadAt(hb, int64(e.Offset)); err != nil {
 		return BlockHeader{}, nil, err
 	}
-	h, err := ParseBlockHeader(hb)
+	h, err := c.checkStored(e, hb)
 	if err != nil {
 		return BlockHeader{}, nil, err
-	}
-	if h.Hash != e.Hash || h.Stored > MaxBlockSize+MaxBlockSize/8 {
-		return BlockHeader{}, nil, fmt.Errorf("%w: block header", ErrCorrupt)
 	}
 	payload := make([]byte, h.Stored)
 	if _, err := r.ReadAt(payload, int64(e.Offset)+BlockHeaderSize); err != nil {
 		return BlockHeader{}, nil, err
 	}
 	return h, payload, nil
+}
+
+func (c *Chain) checkStored(e Entry, hb []byte) (BlockHeader, error) {
+	h, err := ParseBlockHeader(hb)
+	if err != nil {
+		return BlockHeader{}, err
+	}
+	if h.Hash != e.Hash || h.Stored > MaxBlockSize+MaxBlockSize/8 {
+		return BlockHeader{}, fmt.Errorf("%w: block header", ErrCorrupt)
+	}
+	return h, nil
+}
+
+// blockEnds returns, for each file and each block the index uses, where the
+// next such block starts, or the index for the last one: nothing of the block
+// lies past that.
+func (c *Chain) blockEnds() []map[uint64]uint64 {
+	c.endsOnce.Do(func() {
+		starts := make([][]uint64, len(c.files))
+		for _, e := range c.Index().Entries {
+			if !e.Zero() && int(e.Level) < len(c.files) {
+				starts[e.Level] = append(starts[e.Level], e.Offset)
+			}
+		}
+		c.ends = make([]map[uint64]uint64, len(c.files))
+		for level, s := range starts {
+			slices.Sort(s)
+			s = slices.Compact(s)
+			ends := make(map[uint64]uint64, len(s))
+			for i, offset := range s {
+				ends[offset] = c.files[level].indexOffset
+				if i+1 < len(s) {
+					ends[offset] = s[i+1]
+				}
+			}
+			c.ends[level] = ends
+		}
+	})
+	return c.ends
 }
 
 // Read returns the raw data of a block, verified against its hash.

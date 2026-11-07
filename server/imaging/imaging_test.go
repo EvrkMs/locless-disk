@@ -316,3 +316,40 @@ func TestPutRejectsDamage(t *testing.T) {
 		t.Fatalf("cut body: %v", err)
 	}
 }
+
+// TestCleanIncomingRemovesWhatAStopLeft: a .part of a clone cut short by a stop
+// or a power cut would otherwise fill the disk, in every place images live.
+func TestCleanIncomingRemovesWhatAStopLeft(t *testing.T) {
+	m, s, images := setup(t)
+	other := filepath.Join(t.TempDir(), "old")
+	if err := s.CreateImage(ctx, "moved", filepath.Join(other, "moved")); err != nil {
+		t.Fatalf("CreateImage: %v", err)
+	}
+	var parts []string
+	for _, place := range []string{images, other} {
+		dir := filepath.Join(place, incomingDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		part := filepath.Join(dir, "7.part")
+		if err := os.WriteFile(part, []byte("x"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		parts = append(parts, part)
+	}
+	kept := filepath.Join(images, incomingDir, "notes.txt")
+	if err := os.WriteFile(kept, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := m.CleanIncoming(ctx); err != nil {
+		t.Fatalf("CleanIncoming: %v", err)
+	}
+	for _, part := range parts {
+		if _, err := os.Stat(part); err == nil {
+			t.Fatalf("%s is still there", part)
+		}
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("a file that is not a .part went: %v", err)
+	}
+}

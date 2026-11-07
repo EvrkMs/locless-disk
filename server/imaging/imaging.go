@@ -36,6 +36,9 @@ var (
 	ErrNoImageDir = errors.New("imaging: image directory is not set")
 	// ErrBusy means another clone of the same image is running.
 	ErrBusy = errors.New("imaging: image is being cloned")
+	// ErrInUse means a PC is still reading or writing the image, for example after
+	// its task was cancelled: the server lets go of it within a minute.
+	ErrInUse = errors.New("imaging: image is in use by a PC")
 	// ErrNoSession means there is no clone in progress for the task.
 	ErrNoSession = errors.New("imaging: no clone in progress")
 )
@@ -52,6 +55,8 @@ type Store interface {
 	DisableAfter(context.Context, string, int) error
 	EnableVersions(context.Context, string, []int) error
 	ReplaceVersions(context.Context, string, store.Version) error
+	Setting(context.Context, string) (string, error)
+	Images(context.Context) ([]store.Image, error)
 }
 
 // Manager runs the clones in progress, one per task.
@@ -156,7 +161,26 @@ func (m *Manager) Start(ctx context.Context, task int64, image, mac string) (pro
 		return proto.CloneInfo{}, ErrNoImageDir
 	}
 
-	m.mu.Lock()
+	// The index of the parent is read before the lock, which every request of every
+	// clone and deploy needs: a slow disk must hold up only this clone. Under the
+	// lock the parent is still the newest version, or the clone starts over.
+	var latest *store.Version
+	var parent *proto.File
+	for {
+		if latest, parent, err = m.readParent(ctx, dir, image); err != nil {
+			return proto.CloneInfo{}, err
+		}
+		m.mu.Lock()
+		now, err := m.store.LatestVersion(ctx, image)
+		if err != nil {
+			m.mu.Unlock()
+			return proto.CloneInfo{}, err
+		}
+		if sameVersion(now, latest) {
+			break
+		}
+		m.mu.Unlock()
+	}
 	defer m.mu.Unlock()
 	if old := m.sessions[task]; old != nil {
 		old.discard()
@@ -173,15 +197,7 @@ func (m *Manager) Start(ctx context.Context, task int64, image, mac string) (pro
 	if err != nil {
 		return proto.CloneInfo{}, err
 	}
-	latest, err := m.store.LatestVersion(ctx, image)
-	if err != nil {
-		return proto.CloneInfo{}, err
-	}
 	if latest != nil {
-		parent, err := openFile(filepath.Join(dir, latest.File))
-		if err != nil {
-			return proto.CloneInfo{}, fmt.Errorf("imaging: parent %s: %w", latest.File, err)
-		}
 		header.Kind, header.BlockSize = proto.KindDelta, parent.Header.BlockSize
 		header.Parent, header.ParentSum = parent.Header.ID, parent.Sum
 		parentIndex = parent.Index
@@ -214,6 +230,59 @@ func (m *Manager) Start(ctx context.Context, task int64, image, mac string) (pro
 	m.sessions[task] = s
 	m.log.Info("clone started", "task", task, "image", image, "version", number)
 	return proto.CloneInfo{BlockSize: header.BlockSize, Image: image, Version: number}, nil
+}
+
+// readParent returns the newest version of an image and its opened file, or nil
+// for an image without versions.
+func (m *Manager) readParent(ctx context.Context, dir, image string) (*store.Version, *proto.File, error) {
+	latest, err := m.store.LatestVersion(ctx, image)
+	if err != nil || latest == nil {
+		return nil, nil, err
+	}
+	parent, err := openFile(filepath.Join(dir, latest.File))
+	if err != nil {
+		return nil, nil, fmt.Errorf("imaging: parent %s: %w", latest.File, err)
+	}
+	return latest, parent, nil
+}
+
+func sameVersion(a, b *store.Version) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Number == b.Number && a.File == b.File
+}
+
+// CleanIncoming removes what clones and merges left unfinished when the server
+// stopped. It runs before any agent can start a clone. Every image keeps its
+// .incoming next to its own folder, so each of those places is looked at.
+func (m *Manager) CleanIncoming(ctx context.Context) error {
+	places := map[string]bool{}
+	if dir, err := m.store.Setting(ctx, store.SettingImageDir); err != nil {
+		return err
+	} else if dir != "" {
+		places[dir] = true
+	}
+	images, err := m.store.Images(ctx)
+	if err != nil {
+		return err
+	}
+	for _, image := range images {
+		if image.Path != "" {
+			places[filepath.Dir(image.Path)] = true
+		}
+	}
+	for place := range places {
+		parts, _ := filepath.Glob(filepath.Join(place, incomingDir, "*.part"))
+		for _, part := range parts {
+			if err := os.Remove(part); err != nil {
+				m.log.Warn("unfinished file not removed", "file", part, "err", err)
+				continue
+			}
+			m.log.Info("unfinished file removed", "file", part)
+		}
+	}
+	return nil
 }
 
 // openFile opens an image file and keeps it only long enough to read its index.
@@ -363,6 +432,7 @@ func (m *Manager) Run(ctx context.Context) {
 			m.sweep(time.Now().Add(idleLimit))
 			return
 		case now := <-tick.C:
+			m.dropEnded(ctx)
 			m.sweep(now)
 		}
 	}
@@ -385,6 +455,32 @@ func (m *Manager) sweep(now time.Time) {
 	m.mu.Unlock()
 	for _, task := range stale {
 		m.Abort(task)
+	}
+}
+
+// dropEnded drops the clones and deploys whose task has ended, for example because
+// the operator cancelled it: the agent may never ask again, and its deploy would
+// hold the files of the image until idleLimit, keeping a merge from removing them.
+func (m *Manager) dropEnded(ctx context.Context) {
+	m.mu.Lock()
+	var tasks []int64
+	for task := range m.sessions {
+		tasks = append(tasks, task)
+	}
+	for task := range m.deploys {
+		tasks = append(tasks, task)
+	}
+	m.mu.Unlock()
+	for _, task := range tasks {
+		open, err := m.store.TaskOpen(ctx, task)
+		if err != nil {
+			m.log.Warn("task state unknown", "task", task, "err", err)
+			continue
+		}
+		if !open {
+			m.log.Info("task ended, its session is dropped", "task", task)
+			m.Abort(task)
+		}
 	}
 }
 

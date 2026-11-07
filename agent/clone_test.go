@@ -329,6 +329,46 @@ func TestOnlyMissingBlocksTravel(t *testing.T) {
 	}
 }
 
+// countingDisk counts reads from any goroutine.
+type countingDisk struct {
+	fakeDisk
+	reads atomic.Int64
+}
+
+func (d *countingDisk) ReadBlock(p uint32, offset uint64, dst []byte) (bool, error) {
+	d.reads.Add(1)
+	return d.fakeDisk.ReadBlock(p, offset, dst)
+}
+
+// TestFailedSendEndsTheReading: right after a failed capture the volume gets its size
+// back, so the reader must be gone by then and stop early, not at the end of the disk.
+func TestFailedSendEndsTheReading(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "нет места", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	blocks := map[uint32][]byte{}
+	for pos := range uint32(cloneBatch * (pipelineSlabs + 3)) {
+		blocks[pos] = fill(byte(pos), testBlock)
+	}
+	d := &countingDisk{fakeDisk: fakeDisk{blocks: blocks, size: uint64(len(blocks)) * testBlock}}
+	worker, _ := testWorker(srv.URL)
+	c := cloneRun{w: worker, src: d, task: 1, blockSize: testBlock, started: time.Now()}
+	worker.names = cloneStages
+	if err := c.readDisk(); err == nil {
+		t.Fatal("readDisk: no error")
+	}
+	reads := d.reads.Load()
+	if reads >= int64(len(blocks)) {
+		t.Fatalf("read all %d blocks after the first batch failed", reads)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if d.reads.Load() != reads {
+		t.Fatal("the disk was read after readDisk returned")
+	}
+}
+
 func TestFormatBytes(t *testing.T) {
 	for n, want := range map[uint64]string{
 		2048:          "2 КБ",

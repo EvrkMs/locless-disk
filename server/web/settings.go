@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"fogs/proto"
@@ -25,14 +26,44 @@ func (h *server) settings(w http.ResponseWriter, r *http.Request) {
 	if !proto.ValidExitMode(mode) {
 		mode = proto.ExitSanboot
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"imageDir": dir, "exitMode": mode, "root": h.root})
+	addr, err := h.store.Setting(r.Context(), store.SettingClientAddr)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"imageDir": dir, "exitMode": mode, "root": h.root,
+		"clientAddr": addr, "addresses": h.addresses(), "bind": h.cfg.Bind})
+}
+
+func (h *server) addresses() []string {
+	if h.cfg.Addresses == nil {
+		return []string{}
+	}
+	return h.cfg.Addresses()
 }
 
 // saveSettings stores the fields present in the request.
 func (h *server) saveSettings(w http.ResponseWriter, r *http.Request) {
-	var in struct{ ImageDir, ExitMode *string }
+	var in struct{ ImageDir, ExitMode, ClientAddr *string }
 	if !readJSON(w, r, &in) {
 		return
+	}
+	defer h.changed() // the client services start, stop or move only if the outcome differs
+	if in.ClientAddr != nil {
+		addr := strings.TrimSpace(*in.ClientAddr)
+		switch {
+		case h.cfg.Bind != "":
+			writeError(w, http.StatusConflict, "Адрес задан при запуске флагом -bind")
+			return
+		case addr != "" && !slices.Contains(h.addresses(), addr):
+			writeError(w, http.StatusBadRequest, "Это не адрес этой машины")
+			return
+		}
+		if err := h.store.SetSetting(r.Context(), store.SettingClientAddr, addr); err != nil {
+			h.fail(w, err)
+			return
+		}
+		h.log.Info("client address changed", "addr", addr)
 	}
 	if in.ExitMode != nil {
 		if !proto.ValidExitMode(*in.ExitMode) {

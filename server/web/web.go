@@ -69,6 +69,26 @@ type Config struct {
 	Addr   string // host:port the panel listens on
 	Root   string // directory served to clients without a login
 	Log    *slog.Logger
+
+	Status    func() Status   // how the client services are; nil reports nothing
+	Changed   func()          // the settings the client services depend on changed; may be nil
+	Addresses func() []string // IPv4 addresses of the machine clients could use
+	Bind      string          // the client address fixed at start with -bind, if any
+}
+
+// Status says whether PCs of the club are being served.
+type Status struct {
+	Addr         string    `json:"addr"`                   // where clients reach the server
+	Waiting      string    `json:"waiting,omitempty"`      // what is missing before the services start
+	Services     []Service `json:"services"`               // the running client services
+	MissingFiles []string  `json:"missingFiles,omitempty"` // boot files not in the served folder
+}
+
+// Service is one client service.
+type Service struct {
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
+	Error   string `json:"error,omitempty"` // why it does not run; it tries again by itself
 }
 
 type server struct {
@@ -76,11 +96,12 @@ type server struct {
 	images Images
 	root   string
 	log    *slog.Logger
+	cfg    Config
 }
 
 // New returns the panel handler.
 func New(c Config) http.Handler {
-	h := &server{store: c.Store, images: c.Images, root: c.Root, log: c.Log}
+	h := &server{store: c.Store, images: c.Images, root: c.Root, log: c.Log, cfg: c}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -160,7 +181,19 @@ func (h *server) state(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts, "discovered": discovered, "images": images, "tasks": tasks, "storageOffline": offline})
+	status := Status{Services: []Service{}}
+	if h.cfg.Status != nil {
+		status = h.cfg.Status()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts, "discovered": discovered, "images": images, "tasks": tasks,
+		"storageOffline": offline, "server": status})
+}
+
+// changed tells the client services to look at the settings again.
+func (h *server) changed() {
+	if h.cfg.Changed != nil {
+		h.cfg.Changed()
+	}
 }
 
 func (h *server) addHost(w http.ResponseWriter, r *http.Request) {
