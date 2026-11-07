@@ -69,6 +69,7 @@ type worker struct {
 	taskID     int64                  // the task being worked on, 0 before the server named one
 	failed     atomic.Bool            // the error screen is up, so a reboot cannot break anything
 	rec        *recorder              // metrics of the clone or deploy running now, nil otherwise
+	attempts   int                    // tries of the task since this boot, for the metrics
 }
 
 // Stages of the link check, in order.
@@ -103,6 +104,7 @@ func (w *worker) run() {
 // attempt does everything from waiting for the network to reporting the result.
 func (w *worker) attempt() error {
 	w.rec = nil
+	w.attempts++
 	w.names = checkStages
 	w.screen.update(func(st *ui.State) {
 		st.Phase, st.Percent = ui.PhaseIdle, -1

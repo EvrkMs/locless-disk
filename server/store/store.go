@@ -583,7 +583,9 @@ func (s *Store) FinishTask(ctx context.Context, mac net.HardwareAddr, id int64, 
 }
 
 // SaveMetrics keeps what the agent measured for a task of its PC, as JSON. A later
-// report replaces an earlier one: a failed attempt and then the result.
+// report replaces an earlier one: a failed attempt and then the result. A task that
+// has ended still takes them on purpose: a cancelled one keeps how far it got. Only
+// the PC of the task can write them.
 func (s *Store) SaveMetrics(ctx context.Context, mac net.HardwareAddr, id int64, metrics string) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET metrics = ?

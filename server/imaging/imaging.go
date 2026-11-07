@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -71,12 +72,15 @@ type Manager struct {
 
 	merging     map[string]bool   // images being merged
 	mergeErrors map[string]string // how the last merge of an image failed
+
+	statsMu sync.Mutex // apart from mu: a Put holds only its session, and notes as it goes
+	stats   map[int64]*taskStats
 }
 
 // New returns a manager.
 func New(s Store, log *slog.Logger) *Manager {
 	return &Manager{store: s, log: log, sessions: map[int64]*session{}, deploys: map[int64]*deploySession{}, claims: map[string]int64{},
-		merging: map[string]bool{}, mergeErrors: map[string]string{}}
+		merging: map[string]bool{}, mergeErrors: map[string]string{}, stats: map[int64]*taskStats{}}
 }
 
 // session is one file being received. Its lock orders the writes of one clone.
@@ -318,6 +322,8 @@ func (m *Manager) Check(task int64, hashes []proto.Sum) ([]byte, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	started := time.Now()
+	defer func() { m.note(task, statCheck, time.Since(started)) }()
 	missing := make([]byte, len(hashes))
 	for i, h := range hashes {
 		if !s.writer.Has(h) {
@@ -335,14 +341,26 @@ func (m *Manager) Put(task int64, r io.Reader) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Timed per record and noted once, so a request costs two lock rounds and not
+	// two per block.
+	var receiving, writing time.Duration
+	var stored uint64
+	defer func() {
+		m.note(task, statReceive, receiving)
+		m.note(task, statWriteImage, writing)
+		m.count(task, "записано в файл образа", stored, true)
+	}()
 	for {
+		at := time.Now()
 		rec, err := proto.ReadPut(r)
+		receiving += time.Since(at)
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
+		at = time.Now()
 		if rec.Block != nil {
 			if rec.Block.Hash != rec.Hash {
 				return fmt.Errorf("%w: record names another block", proto.ErrCorrupt)
@@ -350,8 +368,11 @@ func (m *Manager) Put(task int64, r io.Reader) error {
 			if err := s.writer.WriteBlock(*rec.Block, rec.Payload); err != nil {
 				return err
 			}
+			stored += uint64(proto.BlockHeaderSize + len(rec.Payload))
 		}
-		if err := s.writer.Put(rec.Partition, rec.Position, rec.Hash); err != nil {
+		err = s.writer.Put(rec.Partition, rec.Position, rec.Hash)
+		writing += time.Since(at)
+		if err != nil {
 			return err
 		}
 	}
@@ -369,6 +390,8 @@ func (m *Manager) Finish(ctx context.Context, task int64, manifest proto.Manifes
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	started := time.Now()
+	defer func() { m.note(task, statFinish, time.Since(started)) }()
 
 	size, err := s.complete(manifest)
 	if err != nil {
@@ -471,15 +494,23 @@ func (m *Manager) dropEnded(ctx context.Context) {
 		tasks = append(tasks, task)
 	}
 	m.mu.Unlock()
-	for _, task := range tasks {
+	// The stats of a task stay until it has ended: its result, and the failure
+	// reports before it, carry them.
+	m.statsMu.Lock()
+	for task := range m.stats {
+		tasks = append(tasks, task)
+	}
+	m.statsMu.Unlock()
+	slices.Sort(tasks)
+	for _, task := range slices.Compact(tasks) {
 		open, err := m.store.TaskOpen(ctx, task)
 		if err != nil {
 			m.log.Warn("task state unknown", "task", task, "err", err)
 			continue
 		}
 		if !open {
-			m.log.Info("task ended, its session is dropped", "task", task)
 			m.Abort(task)
+			m.forgetStats(task)
 		}
 	}
 }

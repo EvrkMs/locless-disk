@@ -18,19 +18,25 @@ type recorder struct {
 	started time.Time
 	step    string // the stage running now, "" before the first
 	stepAt  time.Time
-	steps   []proto.MetricTime
-	work    []proto.MetricTime // in the order each kind first appeared
+	steps   []span
+	work    []span // in the order each kind first appeared
 	amounts []proto.MetricAmount
-	peak    uint64 // the most memory seen
+	peak    uint64 // the most memory the Go runtime was seen holding
 	cpu0    time.Duration
 	gc0     uint64
+	attempt int
+
+	frames0           int64 // the screen counters at the start
+	render0, present0 time.Duration
 }
 
-func newRecorder() *recorder {
-	r := &recorder{now: time.Now}
+// newRecorder starts the metrics of a task; attempt counts its tries since boot.
+func newRecorder(attempt int) *recorder {
+	r := &recorder{now: time.Now, attempt: attempt}
 	r.started = r.now()
 	r.cpu0 = processCPU()
 	r.gc0, r.peak = runtimeStats()
+	r.frames0, r.render0, r.present0 = uiSnapshot()
 	return r
 }
 
@@ -50,7 +56,7 @@ func (r *recorder) closeStep(now time.Time) {
 	if r.step == "" {
 		return
 	}
-	r.steps = addTime(r.steps, r.step, now.Sub(r.stepAt))
+	r.steps = addSpan(r.steps, r.step, now.Sub(r.stepAt))
 	r.step = ""
 }
 
@@ -61,7 +67,7 @@ func (r *recorder) Add(kind string, d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.work = addTime(r.work, kind, d)
+	r.work = addSpan(r.work, kind, d)
 }
 
 // Time starts timing a kind of work; the returned function stops it.
@@ -115,36 +121,63 @@ func (r *recorder) Result() *proto.TaskMetrics {
 	r.Sample()
 	gc, _ := runtimeStats()
 	cpu := processCPU()
+	frames, render, present := uiSnapshot()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	steps := append([]proto.MetricTime(nil), r.steps...)
+	steps := append([]span(nil), r.steps...)
 	if r.step != "" {
-		steps = addTime(steps, r.step, now.Sub(r.stepAt))
+		steps = addSpan(steps, r.step, now.Sub(r.stepAt))
+	}
+	peak, ok := processPeakMemory()
+	if !ok {
+		peak = r.peak
 	}
 	return &proto.TaskMetrics{
-		TotalMs:    now.Sub(r.started).Milliseconds(),
-		Steps:      steps,
-		Work:       append([]proto.MetricTime{}, r.work...),
-		Amounts:    append([]proto.MetricAmount{}, r.amounts...),
-		CPUMs:      max(cpu-r.cpu0, 0).Milliseconds(),
-		Cores:      runtime.NumCPU(),
-		PeakMemory: r.peak,
-		GCCycles:   uint32(gc - r.gc0),
+		V:           proto.MetricsVersion,
+		Attempt:     r.attempt,
+		TotalMs:     now.Sub(r.started).Milliseconds(),
+		Steps:       toMetricTimes(steps),
+		Work:        toMetricTimes(r.work),
+		Amounts:     append([]proto.MetricAmount{}, r.amounts...),
+		CPUMs:       max(cpu-r.cpu0, 0).Milliseconds(),
+		Cores:       runtime.NumCPU(),
+		PeakMemory:  peak,
+		GCCycles:    uint32(max(gc, r.gc0) - r.gc0),
+		UIFrames:    frames - r.frames0,
+		UIRenderMs:  (render - r.render0).Milliseconds(),
+		UIPresentMs: (present - r.present0).Milliseconds(),
 	}
 }
 
-// addTime adds d to the entry called name, or appends one. A stage that comes
+// span is time spent on one named thing. It is kept exact: a block is hashed or
+// read in well under a millisecond, and thousands of such pieces must add up
+// instead of each rounding down to nothing.
+type span struct {
+	name string
+	d    time.Duration
+}
+
+// addSpan adds d to the entry called name, or appends one. A stage that comes
 // twice, as after a retry, is one entry.
-func addTime(list []proto.MetricTime, name string, d time.Duration) []proto.MetricTime {
-	ms := d.Milliseconds()
+func addSpan(list []span, name string, d time.Duration) []span {
 	for i := range list {
-		if list[i].Name == name {
-			list[i].Ms += ms
+		if list[i].name == name {
+			list[i].d += d
 			return list
 		}
 	}
-	return append(list, proto.MetricTime{Name: name, Ms: ms})
+	return append(list, span{name, d})
+}
+
+// toMetricTimes turns each total into milliseconds only now, once. It cuts the
+// fraction like the total of the task does, so the stages never add up to more.
+func toMetricTimes(list []span) []proto.MetricTime {
+	out := make([]proto.MetricTime, len(list))
+	for i, s := range list {
+		out[i] = proto.MetricTime{Name: s.name, Ms: s.d.Milliseconds()}
+	}
+	return out
 }
 
 // runtimeStats returns the garbage collections so far and the memory the Go

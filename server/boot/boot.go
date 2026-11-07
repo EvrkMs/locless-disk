@@ -92,12 +92,15 @@ type Config struct {
 	Clone    CloneManager                // receives images
 	Deploy   DeployManager               // sends images
 	Log      *slog.Logger
+
+	boots *bootClock // made by New
 }
 
 // New returns the handler for everything clients ask for: /boot.ipxe,
 // /winpeshl.ini, /files/ and the agent's /agent/.
 func New(c Config) http.Handler {
 	mux := http.NewServeMux()
+	c.boots = newBootClock()
 	mux.HandleFunc("GET /boot.ipxe", func(w http.ResponseWriter, r *http.Request) {
 		mac, err := net.ParseMAC(r.URL.Query().Get("mac"))
 		if err != nil || len(mac) != 6 {
@@ -111,6 +114,7 @@ func New(c Config) http.Handler {
 		case task:
 			script = agentScript(c.HTTPAddr, mac)
 			c.Started(mac)
+			c.boots.scriptSent(mac.String())
 		case known:
 			script = fmt.Sprintf("#!ipxe\necho FOGs: host %s has no task, booting from disk\n%s", mac, leave(c.exitMode(), c.HTTPAddr))
 		}

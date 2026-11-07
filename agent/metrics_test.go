@@ -13,7 +13,7 @@ import (
 
 func TestRecorderCountsStepsWorkAndAmounts(t *testing.T) {
 	clock := time.Unix(1000, 0)
-	r := newRecorder()
+	r := newRecorder(1)
 	r.now = func() time.Time { return clock }
 	r.started = clock
 
@@ -53,6 +53,26 @@ func TestRecorderCountsStepsWorkAndAmounts(t *testing.T) {
 	clock = clock.Add(time.Second)
 	if again := r.Result(); again.Steps[0].Ms != 4000 || len(again.Steps) != 2 {
 		t.Fatalf("second result %+v", again.Steps)
+	}
+}
+
+// TestRecorderKeepsShortWork: a block is hashed in well under a millisecond, and
+// thousands of those must add up instead of each counting as nothing.
+func TestRecorderKeepsShortWork(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	r := newRecorder(1)
+	r.now = func() time.Time { return clock }
+	r.started = clock
+	r.Step("этап")
+	for range 100 {
+		stop := r.Time("хэш")
+		clock = clock.Add(700 * time.Microsecond)
+		stop()
+		r.Step("этап") // a stage started again many times
+	}
+	m := r.Result()
+	if m.Work[0].Ms != 70 || m.Steps[0].Ms != 70 || m.TotalMs != 70 {
+		t.Fatalf("work %+v, steps %+v, total %d", m.Work, m.Steps, m.TotalMs)
 	}
 }
 
@@ -114,6 +134,23 @@ func checkTimes(t *testing.T, m proto.TaskMetrics) {
 	}
 }
 
+// checkServer checks the parts every result carries besides the work of the agent:
+// the layout version, the try, and the side of the server.
+func checkServer(t *testing.T, m proto.TaskMetrics, kinds ...string) {
+	t.Helper()
+	if m.V != proto.MetricsVersion || m.Attempt != 1 {
+		t.Fatalf("version %d, attempt %d", m.V, m.Attempt)
+	}
+	if m.Server == nil {
+		t.Fatal("no metrics of the server")
+	}
+	for _, kind := range kinds {
+		if !slices.Contains(names(m.Server.Work), kind) {
+			t.Fatalf("no %q in %v", kind, names(m.Server.Work))
+		}
+	}
+}
+
 func TestCloneSendsItsMetrics(t *testing.T) {
 	e := newCloneEnv(t)
 	blocks := map[uint32][]byte{}
@@ -125,6 +162,7 @@ func TestCloneSendsItsMetrics(t *testing.T) {
 
 	m := lastMetrics(t, e.s)
 	checkTimes(t, m)
+	checkServer(t, m, "проверка хэшей", "приём блоков из сети", "запись блоков в файл образа", "сброс и проверка готового файла")
 	wantSteps := []string{"Открытие диска", "Ожидание очереди на образ", "Сжатие тома", "Чтение диска и отправка",
 		"Возврат размера тома", "Проверка и сохранение на сервере"}
 	if got := names(m.Steps); !slices.Equal(got, wantSteps) {
@@ -168,6 +206,7 @@ func TestDeploySendsItsMetrics(t *testing.T) {
 	}
 	m := lastMetrics(t, e.s)
 	checkTimes(t, m)
+	checkServer(t, m, "открытие образа", "список блоков", "чтение блоков образа с диска", "отправка блоков в сеть")
 	wantSteps := []string{"Открытие диска", "Ожидание очереди на образ", "Отсчёт перед стиранием", "Таблица разделов",
 		"Список блоков", "Запись нулевых блоков", "Загрузка и запись блоков", "Сброс записи на диск",
 		"Расширение тома", "Загрузочная запись", "Имя ПК", "Отчёт серверу"}

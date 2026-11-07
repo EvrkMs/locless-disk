@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
+	"unicode/utf8"
 
 	"fogs/proto"
 	"fogs/server/imaging"
@@ -254,5 +256,116 @@ func TestSavedTableComesBackWithTheNextTask(t *testing.T) {
 	}
 	if w := call(h, http.MethodPost, "/agent/table?mac=02:00:00:00:00:01", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown PC: %d", w.Code)
+	}
+}
+
+// TestMetricsReachTheLog: a line of the log is enough to see where a task spent
+// its time, the work inside the stages and the amounts included.
+func TestMetricsReachTheLog(t *testing.T) {
+	_, s, host := agentServer(t)
+	task, err := s.CreateTask(context.Background(), host.ID, store.TaskDeploy, "win11")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	var log strings.Builder
+	c := Config{Agent: s, Log: slog.New(slog.NewTextHandler(&log, nil))}
+	m := &proto.TaskMetrics{
+		TotalMs: 61000,
+		Steps:   []proto.MetricTime{{Name: "Загрузка и запись блоков", Ms: 60000}},
+		Work:    []proto.MetricTime{{Name: "запись ждёт загрузку", Ms: 30000}},
+		Amounts: []proto.MetricAmount{{Name: "записано на диск", Value: 3 << 20, Bytes: true}, {Name: "пачек", Value: 7}},
+	}
+	saveMetrics(context.Background(), c, testMAC, task.ID, m)
+	for _, want := range []string{"total=1m1s", "steps.Загрузка и запись блоков\"=1m0s", "work.запись ждёт загрузку\"=30s",
+		"amounts.записано на диск, MiB\"=3", "amounts.пачек=7"} {
+		if !strings.Contains(log.String(), want) {
+			t.Fatalf("no %q in %s", want, log.String())
+		}
+	}
+	if data, err := s.TaskMetrics(context.Background(), task.ID); err != nil || !strings.Contains(data, "пачек") {
+		t.Fatalf("stored %q, err %v", data, err)
+	}
+}
+
+func TestClipDetails(t *testing.T) {
+	if got := clipDetails("короткий"); got != "короткий" {
+		t.Fatalf("short: %q", got)
+	}
+	long := strings.Repeat("я", maxReportDetails) // two bytes each
+	got := clipDetails(long)
+	if len(got) > maxReportDetails || !utf8.ValidString(got) || len(got) < maxReportDetails-1 {
+		t.Fatalf("%d bytes, valid %v", len(got), utf8.ValidString(got))
+	}
+	odd := "x" + long // the cut falls in the middle of a letter
+	if got := clipDetails(odd); !utf8.ValidString(got) || len(got) != maxReportDetails-1 {
+		t.Fatalf("odd: %d bytes, valid %v", len(got), utf8.ValidString(got))
+	}
+}
+
+// TestCancelledTaskKeepsItsMetrics: the report of a task cancelled meanwhile is
+// refused, and its metrics are still kept, while another PC cannot write them.
+func TestCancelledTaskKeepsItsMetrics(t *testing.T) {
+	h, s, host := agentServer(t)
+	ctx := context.Background()
+	task, err := s.CreateTask(ctx, host.ID, store.TaskClone, "win11")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if err := s.CancelTask(ctx, host.ID); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	url := "/agent/tasks/" + strconv.FormatInt(task.ID, 10) + "/progress"
+	m := &proto.TaskMetrics{TotalMs: 1500, Steps: []proto.MetricTime{{Name: "Сжатие тома", Ms: 1500}}}
+	other := proto.AgentProgress{MAC: "aa:bb:cc:00:00:09", Stage: proto.StageFailed, Message: "x", Metrics: m}
+	if w := call(h, http.MethodPost, url, other); w.Code != http.StatusGone {
+		t.Fatalf("another PC: %d", w.Code)
+	}
+	if data, _ := s.TaskMetrics(ctx, task.ID); data != "" {
+		t.Fatalf("another PC wrote %q", data)
+	}
+	own := proto.AgentProgress{MAC: testMAC.String(), Stage: proto.StageFailed, Message: "x", Metrics: m}
+	if w := call(h, http.MethodPost, url, own); w.Code != http.StatusGone {
+		t.Fatalf("cancelled task: %d", w.Code)
+	}
+	if data, _ := s.TaskMetrics(ctx, task.ID); !strings.Contains(data, "Сжатие тома") {
+		t.Fatalf("metrics of the cancelled task: %q", data)
+	}
+}
+
+// TestBootTimeReachesTheMetrics: the server measures from the boot script to the
+// first request of the agent, and puts it into the metrics of the task.
+func TestBootTimeReachesTheMetrics(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "fogs.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ctx := context.Background()
+	host, _ := s.AddHost(ctx, testMAC, "PC-12")
+	task, err := s.CreateTask(ctx, host.ID, store.TaskClone, "win11")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	yes := func(net.HardwareAddr) bool { return true }
+	images := imaging.New(s, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := New(Config{HTTPAddr: "192.168.88.105:8080", Known: yes, HasTask: yes, Started: func(net.HardwareAddr) {},
+		Files: fstest.MapFS{}, Agent: s, Clone: images, Deploy: images, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+
+	if w := call(h, http.MethodGet, "/boot.ipxe?mac="+testMAC.String(), nil); w.Code != http.StatusOK {
+		t.Fatalf("boot.ipxe: %d", w.Code)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if w := call(h, http.MethodGet, "/agent/task?mac="+testMAC.String(), nil); w.Code != http.StatusOK {
+		t.Fatalf("task: %d", w.Code)
+	}
+	url := "/agent/tasks/" + strconv.FormatInt(task.ID, 10) + "/finish"
+	res := proto.AgentResult{MAC: testMAC.String(), OK: true, Message: "ok", Metrics: &proto.TaskMetrics{TotalMs: 1}}
+	if w := call(h, http.MethodPost, url, res); w.Code != http.StatusNoContent {
+		t.Fatalf("finish: %d %s", w.Code, w.Body)
+	}
+	data, _ := s.TaskMetrics(ctx, task.ID)
+	var m proto.TaskMetrics
+	if err := json.Unmarshal([]byte(data), &m); err != nil || m.Server == nil || m.Server.BootMs < 20 {
+		t.Fatalf("metrics %q, err %v", data, err)
 	}
 }

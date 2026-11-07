@@ -68,6 +68,9 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		if took, ok := c.boots.agentArrived(mac.String(), task.ID); ok {
+			c.Log.Info("WinPE started", "mac", mac.String(), "task", task.ID, "took", took.Round(100*time.Millisecond).String())
+		}
 		table, err := c.Agent.SavedTable(r.Context(), mac)
 		if err != nil {
 			internalError(w, c, err)
@@ -115,8 +118,10 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 			return
 		}
 		if in.Stage == proto.StageFailed {
-			c.Log.Warn("agent reported an error", "mac", mac.String(), "task", id, "message", clip(in.Message), "details", in.Details)
+			c.Log.Warn("agent reported an error", "mac", mac.String(), "task", id, "message", clip(in.Message), "details", clipDetails(in.Details))
 		}
+		// Before the report and whatever its answer: a task cancelled meanwhile keeps
+		// how far it got. SaveMetrics takes only the PC of the task.
 		saveMetrics(r.Context(), c, mac, id, in.Metrics)
 		err := c.Agent.ReportProgress(r.Context(), mac, id, in.Percent, clip(in.Stage), clip(in.Message))
 		finishReport(w, c, err)
@@ -131,6 +136,7 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 		saveMetrics(r.Context(), c, mac, id, in.Metrics)
 		err := c.Agent.FinishTask(r.Context(), mac, id, in.OK, clip(in.Message))
 		if err == nil {
+			c.boots.forget(id)
 			if c.Clone != nil {
 				c.Clone.Abort(id) // nothing to drop after a successful clone
 			}
@@ -220,6 +226,7 @@ func saveMetrics(ctx context.Context, c Config, mac net.HardwareAddr, id int64, 
 	for i := range m.Amounts {
 		m.Amounts[i].Name = clip(m.Amounts[i].Name)
 	}
+	m.Server = serverMetrics(c, id) // only the server knows its side
 	data, err := json.Marshal(m)
 	if err == nil {
 		err = c.Agent.SaveMetrics(ctx, mac, id, string(data))
@@ -228,12 +235,64 @@ func saveMetrics(ctx context.Context, c Config, mac net.HardwareAddr, id int64, 
 		c.Log.Warn("metrics not saved", "mac", mac.String(), "task", id, "err", err)
 		return
 	}
-	steps := make([]any, 0, 2*len(m.Steps))
-	for _, s := range m.Steps {
-		steps = append(steps, s.Name, (time.Duration(s.Ms) * time.Millisecond).String())
-	}
+	amounts := logAmounts(m.Amounts)
 	c.Log.Info("task metrics", "mac", mac.String(), "task", id,
-		"total", (time.Duration(m.TotalMs) * time.Millisecond).String(),
-		"cpu", (time.Duration(m.CPUMs) * time.Millisecond).String(), "cores", m.Cores,
-		"peakMemoryMiB", m.PeakMemory>>20, "gc", m.GCCycles, slog.Group("steps", steps...))
+		"total", millis(m.TotalMs), "cpu", millis(m.CPUMs), "cores", m.Cores,
+		"peakMemoryMiB", m.PeakMemory>>20, "gc", m.GCCycles,
+		slog.Group("steps", times(m.Steps)...), slog.Group("work", times(m.Work)...), slog.Group("amounts", amounts...))
+	if s := m.Server; s != nil {
+		c.Log.Info("task metrics of the server", "mac", mac.String(), "task", id,
+			"boot", millis(s.BootMs), slog.Group("work", times(s.Work)...), slog.Group("amounts", logAmounts(s.Amounts)...))
+	}
+}
+
+// serverMetrics collects the side of the server for a task, or nil if it has none.
+func serverMetrics(c Config, id int64) *proto.ServerMetrics {
+	s := &proto.ServerMetrics{BootMs: c.boots.bootTime(id).Milliseconds()}
+	if c.Clone != nil {
+		s.Work, s.Amounts = c.Clone.ServerStats(id)
+	}
+	if s.BootMs == 0 && len(s.Work) == 0 && len(s.Amounts) == 0 {
+		return nil
+	}
+	return s
+}
+
+// logAmounts turns amounts into log attributes, bytes in MiB.
+func logAmounts(list []proto.MetricAmount) []any {
+	out := make([]any, 0, 2*len(list))
+	for _, a := range list {
+		if a.Bytes {
+			out = append(out, a.Name+", MiB", a.Value>>20)
+		} else {
+			out = append(out, a.Name, a.Value)
+		}
+	}
+	return out
+}
+
+// times turns named spans into log attributes, each as a duration.
+func times(list []proto.MetricTime) []any {
+	out := make([]any, 0, 2*len(list))
+	for _, t := range list {
+		out = append(out, t.Name, millis(t.Ms))
+	}
+	return out
+}
+
+func millis(ms int64) string { return (time.Duration(ms) * time.Millisecond).String() }
+
+// maxReportDetails bounds the stack of a crash in the log; the agent sends 4000 bytes.
+const maxReportDetails = 4096
+
+// clipDetails cuts a stack to maxReportDetails bytes without breaking UTF-8.
+func clipDetails(s string) string {
+	if len(s) <= maxReportDetails {
+		return s
+	}
+	s = s[:maxReportDetails]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }

@@ -108,7 +108,7 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 		st.Center, st.Caption = "0%", "подготовка"
 		st.Title, st.Detail = "Развёртывание образа", "Образ "+task.Image
 	})
-	w.rec = newRecorder()
+	w.rec = newRecorder(w.attempts)
 	w.rec.Step("Открытие диска")
 
 	dst, err := w.openTarget()
@@ -263,6 +263,8 @@ func (w *worker) runFormat(task *proto.AgentTask) error {
 		st.Center, st.Caption = "0%", "подготовка"
 		st.Title, st.Detail = "Форматирование диска", "Том "+proto.FormatLabel
 	})
+	w.rec = newRecorder(w.attempts)
+	w.rec.Step("Открытие диска")
 	dst, err := w.openTarget()
 	if err != nil {
 		return fmt.Errorf("не удалось открыть диск: %w", err)
@@ -270,6 +272,7 @@ func (w *worker) runFormat(task *proto.AgentTask) error {
 	defer dst.Close()
 	w.screen.log("диск: " + dst.Describe())
 
+	w.rec.Step("Отсчёт перед стиранием")
 	if !w.confirmWipe(dst, "том "+proto.FormatLabel) {
 		w.screen.log("отменено на компьютере")
 		if err := w.finish(task.ID, false, "отменено на компьютере"); err != nil {
@@ -281,6 +284,7 @@ func (w *worker) runFormat(task *proto.AgentTask) error {
 	w.screen.update(func(st *ui.State) {
 		st.Center, st.Caption, st.Hint = "…", "форматирование", "Не выключайте компьютер"
 	})
+	w.rec.Step("Разметка и форматирование")
 	if err := dst.Format(proto.FormatLabel); err != nil {
 		return fmt.Errorf("не удалось отформатировать диск: %w", err)
 	}
@@ -288,6 +292,7 @@ func (w *worker) runFormat(task *proto.AgentTask) error {
 		w.forgetTable() // the volume it was saved for is gone
 	}
 	w.setStage(stageFinish)
+	w.rec.Step("Отчёт серверу")
 	message := dst.Describe() + ", том " + proto.FormatLabel
 	if err := w.finish(task.ID, true, message); err != nil {
 		return err

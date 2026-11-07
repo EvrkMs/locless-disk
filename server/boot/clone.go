@@ -29,6 +29,9 @@ type CloneManager interface {
 	Put(task int64, r io.Reader) error
 	Finish(ctx context.Context, task int64, m proto.Manifest) (proto.CloneResult, error)
 	Abort(task int64)
+	// ServerStats returns what the server did for a task: time by kind of work and
+	// amounts, for the metrics of the task.
+	ServerStats(task int64) ([]proto.MetricTime, []proto.MetricAmount)
 }
 
 // ownTask checks that the sender owns this active task of the given kind. A

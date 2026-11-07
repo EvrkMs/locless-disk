@@ -498,7 +498,11 @@ function activeRow(t) {
     el('td', {}, progress(t)),
     messageCell(t),
     el('td', { className: 'when hide-sm', textContent: ago(t.createdAt) }),
-    el('td', { className: 'actions' }, button('Отменить', '', () => act('DELETE', `/api/hosts/${t.hostId}/task`))));
+    // A failed attempt has already sent how far it got, while the PC still shows the error.
+    el('td', { className: 'actions' },
+      t.hasMetrics ? el('button', { type: 'button', textContent: 'Метрики', onclick: () => showMetrics(t) }) : '',
+      t.hasMetrics ? ' ' : '',
+      button('Отменить', '', () => act('DELETE', `/api/hosts/${t.hostId}/task`))));
 }
 
 function doneRow(t) {
@@ -551,23 +555,45 @@ async function showMetrics(t) {
   }
   const load = m.totalMs && m.cores ? Math.round(m.cpuMs * 100 / (m.totalMs * m.cores)) : 0;
   const summary = [
-    ['Всего', formatMs(m.totalMs)],
-    ['Процессор', formatMs(m.cpuMs) + ` · ${m.cores} ядер, в среднем ${load}% всех ядер`],
-    ['Память агента, пик', formatSize(m.peakMemory)],
-    ['Сборок мусора', String(m.gcCycles)],
+    ['Эта попытка', formatMs(m.totalMs) + (m.attempt > 1 ? ` · попытка ${m.attempt}` : '')],
   ];
-  const amounts = (m.amounts || []).map(a => el('tr', {},
-    el('td', { textContent: a.name }),
-    el('td', { className: 'num', textContent: a.bytes ? formatSize(a.value) : a.value.toLocaleString('ru-RU') })));
-  $('metricsBody').replaceChildren(
-    el('table', {}, el('tbody', {}, ...summary.map(([k, v]) => el('tr', {}, el('td', { textContent: k }), el('td', { className: 'num', textContent: v }))))),
+  if (t.finishedAt) summary.push(['С создания задачи до конца', formatMs(new Date(t.finishedAt) - new Date(t.createdAt))]);
+  if (m.server && m.server.bootMs) summary.push(['Загрузка WinPE до агента', formatMs(m.server.bootMs)]);
+  summary.push(
+    ['Процессор', formatMs(m.cpuMs) + ` · ${m.cores} ядер, в среднем ${load}% всех ядер`],
+    ['Пик памяти агента (WorkingSet)', formatSize(m.peakMemory)],
+    ['Сборок мусора', String(m.gcCycles)]);
+  if (m.uiFrames) {
+    const ui = m.uiRenderMs + m.uiPresentMs;
+    summary.push(['Экран агента', `${m.uiFrames.toLocaleString('ru-RU')} кадров, ${formatMs(ui)}` +
+      (m.totalMs ? ` (${(ui * 100 / m.totalMs).toFixed(1)}% одного ядра)` : '')]);
+  }
+  const parts = [
+    amountTable(summary),
     el('h3', { textContent: 'Этапы' }),
     ...metricRows(m.steps || [], m.totalMs),
     el('h3', { textContent: 'Работа внутри этапов' }),
     ...metricRows(m.work || [], m.totalMs,
       'Чтение, сжатие, сеть и запись идут одновременно, поэтому время пересекается. Большое «ждёт» показывает, какая другая часть не успевает.'),
     el('h3', { textContent: 'Объёмы' }),
-    el('table', {}, el('tbody', {}, ...amounts)));
+    amountTable(amountPairs(m.amounts))];
+  if (m.server && ((m.server.work || []).length || (m.server.amounts || []).length)) {
+    parts.push(
+      el('h3', { textContent: 'Сервер' }),
+      ...metricRows(m.server.work || [], m.totalMs,
+        'Время сервера на те же запросы. Агент видит их вместе с сетью, поэтому разница с его «загрузкой» и «передачей» — это сеть и ожидание.'),
+      amountTable(amountPairs(m.server.amounts)));
+  }
+  $('metricsBody').replaceChildren(...parts);
+}
+
+function amountPairs(list) {
+  return (list || []).map(a => [a.name, a.bytes ? formatSize(a.value) : a.value.toLocaleString('ru-RU')]);
+}
+
+function amountTable(pairs) {
+  return el('table', {}, el('tbody', {}, ...pairs.map(([k, v]) =>
+    el('tr', {}, el('td', { textContent: k }), el('td', { className: 'num', textContent: v })))));
 }
 
 // A click on a column header makes that column stand out. It is a rule and not a

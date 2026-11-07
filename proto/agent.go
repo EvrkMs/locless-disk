@@ -59,18 +59,49 @@ type AgentResult struct {
 // TaskMetrics says where a clone or a deploy spent its time and what it used, so a
 // slow task can be explained afterwards and a change can be measured.
 type TaskMetrics struct {
+	// V is the version of this layout, so a reader can tell old records apart.
+	V int `json:"v"`
+	// Attempt counts the tries of the task since the PC booted, from 1. TotalMs is
+	// the time of this try; an earlier failed one sent its own metrics, now replaced.
+	Attempt int   `json:"attempt"`
 	TotalMs int64 `json:"totalMs"`
-	// Steps are the stages of the task in order, by the clock; they add up to the total.
+	// Steps are the stages of the task in order, by the clock. Each is cut to whole
+	// milliseconds, so together they come to the total or a few milliseconds less.
 	Steps []MetricTime `json:"steps"`
 	// Work is the time each kind of work took. In a pipeline the kinds run at once,
 	// so they overlap; a stage that waits a lot shows which other one is too slow.
 	Work    []MetricTime   `json:"work"`
 	Amounts []MetricAmount `json:"amounts"`
 
-	CPUMs      int64  `json:"cpuMs"`      // processor time of the agent, all cores together
-	Cores      int    `json:"cores"`      // logical processors of the PC
-	PeakMemory uint64 `json:"peakMemory"` // the most memory the agent held, in bytes
-	GCCycles   uint32 `json:"gcCycles"`   // garbage collections during the task
+	CPUMs int64 `json:"cpuMs"` // processor time of the agent, all cores together
+	Cores int   `json:"cores"` // logical processors of the PC
+	// PeakMemory is the peak working set of the agent in bytes, as Windows counts
+	// it. Elsewhere it is the most memory the Go runtime was seen holding.
+	PeakMemory uint64 `json:"peakMemory"`
+	GCCycles   uint32 `json:"gcCycles"` // garbage collections during the task
+
+	// The screen of the agent: frames drawn, time to draw them and to put them in
+	// the window. It runs beside the work and takes processor time from it.
+	UIFrames    int64 `json:"uiFrames"`
+	UIRenderMs  int64 `json:"uiRenderMs"`
+	UIPresentMs int64 `json:"uiPresentMs"`
+
+	// Server is what the server did for the task. The agent leaves it empty; the
+	// server fills it in before it keeps the metrics.
+	Server *ServerMetrics `json:"server,omitempty"`
+}
+
+// MetricsVersion is the current TaskMetrics.V.
+const MetricsVersion = 1
+
+// ServerMetrics is the side of the server: the agent sees the same requests with
+// the network in them, so the two together tell the network from the server.
+type ServerMetrics struct {
+	// BootMs is the time from handing the PC its boot script to the first request of
+	// its agent: firmware, iPXE, downloading and starting WinPE. 0 if unknown.
+	BootMs  int64          `json:"bootMs"`
+	Work    []MetricTime   `json:"work"`
+	Amounts []MetricAmount `json:"amounts"`
 }
 
 // MetricTime is a named span of time.

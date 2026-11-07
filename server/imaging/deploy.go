@@ -58,7 +58,9 @@ func (m *Manager) StartDeploy(ctx context.Context, task int64, image string) (pr
 		return proto.DeployInfo{}, ErrBusy
 	}
 
+	opened := time.Now()
 	s, err := openChain(dir, versions)
+	m.note(task, statOpen, time.Since(opened))
 	if err != nil {
 		return proto.DeployInfo{}, err
 	}
@@ -101,6 +103,8 @@ func (m *Manager) DeployList(task int64, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	started := time.Now()
+	defer func() { m.note(task, statList, time.Since(started)) }()
 	b := make([]byte, 0, 40*len(s.entries))
 	for _, e := range s.entries {
 		b = proto.AppendDeployEntry(b, proto.DeployEntry{Partition: e.Partition, Position: e.Position, Hash: e.Hash})
@@ -116,17 +120,31 @@ func (m *Manager) DeployBlocks(task int64, numbers []uint32, w io.Writer) error 
 	if err != nil {
 		return err
 	}
+	// Timed per block and noted once, like Put.
+	var reading, sending time.Duration
+	var sent uint64
+	defer func() {
+		m.note(task, statReadImage, reading)
+		m.note(task, statSend, sending)
+		m.count(task, "отдано по сети", sent, true)
+	}()
 	for _, n := range numbers {
 		if int64(n) >= int64(len(s.entries)) {
 			return fmt.Errorf("imaging: no entry %d", n)
 		}
+		at := time.Now()
 		h, payload, err := s.chain.Stored(s.entries[n])
+		reading += time.Since(at)
 		if err != nil {
 			return err
 		}
-		if err := proto.WriteStored(w, h, payload); err != nil {
+		at = time.Now()
+		err = proto.WriteStored(w, h, payload)
+		sending += time.Since(at)
+		if err != nil {
 			return err
 		}
+		sent += uint64(proto.BlockHeaderSize + len(payload))
 	}
 	return nil
 }

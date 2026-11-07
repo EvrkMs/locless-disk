@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -381,4 +382,41 @@ func TestEndedTaskFreesTheImage(t *testing.T) {
 		t.Fatalf("StartMerge: %v", err)
 	}
 	waitMerge(t, m)
+}
+
+// TestServerStatsOutliveTheSession: the result of the agent comes after the clone
+// is finished on the server, so the stats stay until the task has ended.
+func TestServerStatsOutliveTheSession(t *testing.T) {
+	m, s, _ := setup(t)
+	task, _ := openTask(t, s, 1, store.TaskClone)
+	if _, err := m.Start(ctx, task.ID, "win11", mac); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	h, payload, _ := proto.EncodeBlock(block(1))
+	body := proto.AppendPut(nil, proto.PutRecord{Partition: 3, Position: 0, Hash: h.Hash, Block: &h, Payload: payload})
+	if err := m.Put(task.ID, bytes.NewReader(body)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	m.Abort(task.ID)
+
+	work, amounts := m.ServerStats(task.ID)
+	kinds := make([]string, len(work))
+	for i, w := range work {
+		kinds[i] = w.Name
+	}
+	if !slices.Equal(kinds, []string{statReceive, statWriteImage}) || len(amounts) != 1 ||
+		amounts[0].Value != uint64(proto.BlockHeaderSize+len(payload)) || !amounts[0].Bytes {
+		t.Fatalf("work %+v, amounts %+v", work, amounts)
+	}
+	m.dropEnded(ctx)
+	if work, _ := m.ServerStats(task.ID); work == nil {
+		t.Fatal("the stats of an open task were dropped")
+	}
+	if err := s.CancelTask(ctx, 1); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	m.dropEnded(ctx)
+	if work, amounts := m.ServerStats(task.ID); work != nil || amounts != nil {
+		t.Fatalf("an ended task kept %+v %+v", work, amounts)
+	}
 }

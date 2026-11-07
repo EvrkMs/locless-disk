@@ -220,15 +220,16 @@ func keyHeld(vk uintptr) bool {
 func windowProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case wmTimer:
-		window.paint(window.frame)
+		timed(&uiStats.renderNs, func() { window.paint(window.frame) })
 		hdc, _, _ := procGetDC.Call(hwnd)
-		present(hdc)
+		timed(&uiStats.presentNs, func() { present(hdc) })
 		procReleaseDC.Call(hwnd, hdc)
+		uiStats.frames.Add(1)
 		return 0
 	case wmPaint:
 		var ps paintStruct
 		hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
-		present(hdc)
+		timed(&uiStats.presentNs, func() { present(hdc) })
 		procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 		return 0
 	case wmEraseBkgnd:
