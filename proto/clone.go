@@ -65,6 +65,15 @@ func ParseHashes(b []byte) ([]Sum, error) {
 	return hashes, nil
 }
 
+// PutRecordSize is how many bytes AppendPut adds for a record.
+func PutRecordSize(r PutRecord) int {
+	n := 4 + 4 + len(r.Hash) + 1
+	if r.Block != nil {
+		n += BlockHeaderSize + len(r.Payload)
+	}
+	return n
+}
+
 // AppendPut encodes one record.
 func AppendPut(dst []byte, r PutRecord) []byte {
 	dst = binary.LittleEndian.AppendUint32(dst, r.Partition)

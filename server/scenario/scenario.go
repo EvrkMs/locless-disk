@@ -207,7 +207,8 @@ func (r *Runner) Advance(ctx context.Context) {
 	if task.FinishedAt == nil {
 		return
 	}
-	step.Finished = task.FinishedAt
+	finished := task.FinishedAt.Local() // the database keeps UTC; the run is in local time
+	step.Finished = &finished
 	if task.Status != store.StatusDone {
 		step.Status = StatusFailed
 		r.end(run, StatusFailed, fmt.Sprintf("%s: %s", step.Name, task.Message))

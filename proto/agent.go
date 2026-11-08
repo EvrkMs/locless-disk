@@ -98,8 +98,9 @@ type TaskMetrics struct {
 }
 
 // MetricsVersion is the current TaskMetrics.V. 2 added the notes, the memory of
-// the PC and the waits inside the deploy pipeline.
-const MetricsVersion = 2
+// the PC and the waits inside the deploy pipeline. 3 split the clone into reading,
+// packing and sending, with the waits between them named after that.
+const MetricsVersion = 3
 
 // MetricNote is a named fact in words.
 type MetricNote struct {

@@ -605,3 +605,43 @@ func TestCrashStillGivesTheVolumeBack(t *testing.T) {
 	w.retry <- struct{}{} // the task is gone, so this ends the run
 	<-done
 }
+
+// TestRequestIsBuiltInOneBuffer: the body is sized before it is filled, so it is
+// never copied while it grows; and equal blocks within a batch travel once.
+func TestRequestIsBuiltInOneBuffer(t *testing.T) {
+	w, _ := testWorker("http://127.0.0.1:1")
+	c := &cloneRun{w: w, blockSize: testBlock}
+	p := packer{c: c}
+	p.bufs.New = func() any {
+		b := make([]byte, 0, proto.MaxEncodedSize(testBlock))
+		return &b
+	}
+	data, same := fill(1, testBlock), fill(2, testBlock)
+	blocks := []pending{
+		{partition: 3, position: 0, raw: data, hash: proto.HashBlock(data)},
+		{partition: 3, position: 1, raw: same, hash: proto.HashBlock(same)},
+		{partition: 3, position: 2, raw: same, hash: proto.HashBlock(same)},
+		{partition: 3, position: 3}, // zeros
+	}
+	body, err := p.encode(blocks, []byte{1, 1, 1, 0})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if cap(body) != len(body) {
+		t.Fatalf("body of %d bytes in a buffer of %d", len(body), cap(body))
+	}
+	r := bytes.NewReader(body)
+	var withData int
+	for range blocks {
+		rec, err := proto.ReadPut(r)
+		if err != nil {
+			t.Fatalf("ReadPut: %v", err)
+		}
+		if rec.Block != nil {
+			withData++
+		}
+	}
+	if withData != 2 || r.Len() != 0 {
+		t.Fatalf("%d blocks with data, %d bytes left", withData, r.Len())
+	}
+}

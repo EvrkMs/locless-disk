@@ -102,6 +102,11 @@ func TestRunGoesThroughTheSteps(t *testing.T) {
 	if done.Status != StatusDone || done.Finished == nil {
 		t.Fatalf("run %+v", done)
 	}
+	for _, st := range done.Steps {
+		if st.Started.Location() != st.Finished.Location() {
+			t.Fatalf("step %q starts in %v and ends in %v", st.Name, st.Started.Location(), st.Finished.Location())
+		}
+	}
 	data, err := os.ReadFile(filepath.Join(e.r.MetricsDir, "scenario-"+done.ID+".json"))
 	if err != nil {
 		t.Fatalf("no scenario file: %v", err)

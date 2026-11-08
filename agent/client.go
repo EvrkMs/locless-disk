@@ -135,8 +135,8 @@ func (c *client) cloneStart(id int64) (proto.CloneInfo, error) {
 }
 
 // cloneCheck asks which blocks the server lacks.
-func (c *client) cloneCheck(id int64, hashes []proto.Sum) ([]byte, error) {
-	missing, err := c.send(id, "check", "application/octet-stream", proto.AppendHashes(nil, hashes))
+func (c *client) cloneCheck(ctx context.Context, id int64, hashes []proto.Sum) ([]byte, error) {
+	missing, err := c.postContext(ctx, c.cloneURL(id, "check"), "application/octet-stream", proto.AppendHashes(nil, hashes))
 	if err == nil && len(missing) != len(hashes) {
 		return nil, fmt.Errorf("сервер ответил на %d блоков из %d", len(missing), len(hashes))
 	}

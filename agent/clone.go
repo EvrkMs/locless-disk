@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -301,9 +303,13 @@ type readBatch struct {
 	err    error
 }
 
-// readDisk sends every stored partition, reading the next batch from the disk while
-// the current one is on its way. The reading has ended by the time this returns: the
-// volume gets its size back right after, and nothing may touch the disk meanwhile.
+// readDisk sends every stored partition through three stages that run at once.
+// The reader takes blocks off the disk; the packer hashes them, asks the server
+// which it lacks and compresses those into a request; this goroutine sends the
+// requests. On a whole clone the network is the slowest part, so it is kept busy
+// while the next batch is packed; on a delta the disk is, and the hashing no longer
+// holds it up. The reading has ended by the time this returns: the volume gets its
+// size back right after, and nothing may touch the disk meanwhile.
 func (c *cloneRun) readDisk() error {
 	m := c.src.Manifest()
 	for _, p := range m.Partitions {
@@ -313,11 +319,14 @@ func (c *cloneRun) readDisk() error {
 	}
 
 	stop := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	defer cancel() // a check under way gives up instead of holding the volume shrunk
 	defer close(stop)
 
 	batches := make(chan readBatch, 1)
+	packed := make(chan sendBatch, 1)
 	free := newSlabs(c.blockSize)
 	r := diskReader{c: c, stop: stop, out: batches, free: free}
 	wg.Go(func() {
@@ -331,10 +340,25 @@ func (c *cloneRun) readDisk() error {
 			}
 		}
 	})
+	p := packer{c: c, ctx: ctx, stop: stop, in: batches, out: packed, free: free, zeros: make([]byte, c.blockSize)}
+	p.bufs.New = func() any {
+		b := make([]byte, 0, proto.MaxEncodedSize(int(c.blockSize)))
+		return &b
+	}
+	wg.Go(func() {
+		defer close(packed)
+		err := recovery.Run(p.run)
+		if err != nil && !errors.Is(err, errReadStopped) {
+			select {
+			case packed <- sendBatch{err: err}:
+			case <-stop:
+			}
+		}
+	})
 
 	for {
 		waited := c.w.rec.Time(workSendWaits)
-		b, ok := <-batches
+		b, ok := <-packed
 		waited()
 		if !ok {
 			return nil
@@ -342,29 +366,31 @@ func (c *cloneRun) readDisk() error {
 		if b.err != nil {
 			return b.err
 		}
-		if err := c.flush(b); err != nil {
+		if err := c.send(b); err != nil {
 			return err
 		}
-		free <- b.slab
 	}
 }
 
 // Kinds of work of a clone, as the metrics name them.
 const (
-	workDiskRead  = "чтение диска"
-	workHash      = "хэш SHA-256"
-	workReadWaits = "чтение ждёт отправку"
-	workSendWaits = "отправка ждёт чтение диска"
-	workCheck     = "проверка хэшей на сервере"
-	workCompress  = "сжатие zstd"
-	workBuild     = "сборка запроса"
-	workUpload    = "передача на сервер"
+	workDiskRead      = "чтение диска"
+	workReadWaits     = "чтение ждёт подготовку"
+	workHash          = "хэш SHA-256"
+	workCheck         = "проверка хэшей на сервере"
+	workCompress      = "сжатие zstd"
+	workBuild         = "сборка запроса"
+	workPackWaits     = "подготовка ждёт чтение"
+	workPackSendWaits = "подготовка ждёт отправку"
+	workSendWaits     = "отправка ждёт подготовку"
+	workUpload        = "передача на сервер"
 )
 
 // errReadStopped means nobody wants the batches any more.
 var errReadStopped = errors.New("чтение диска остановлено")
 
-// diskReader walks the partitions block by block on a goroutine of its own.
+// diskReader walks the partitions block by block on a goroutine of its own. It
+// only reads: telling zeros from data and hashing is the work of the packer.
 type diskReader struct {
 	c     *cloneRun
 	stop  <-chan struct{}
@@ -414,19 +440,8 @@ func (r *diskReader) readPartition(p proto.Partition) error {
 			rec.Count("свободных блоков пропущено", 1)
 			continue
 		}
-		// Used and all zeros: deploy must overwrite this place, so it stays in the
-		// index as a zero entry, with no data.
-		block := pending{partition: p.Number, position: uint32(offset / size)}
-		if isEmpty(raw) {
-			rec.Count("нулевых блоков", 1)
-		} else {
-			hashed := rec.Time(workHash)
-			block.raw, block.hash = raw, proto.HashBlock(raw)
-			hashed()
-			rec.Count("блоков с данными", 1)
-		}
 		rec.Bytes("прочитано с диска", uint64(len(raw)))
-		r.batch.blocks = append(r.batch.blocks, block)
+		r.batch.blocks = append(r.batch.blocks, pending{partition: p.Number, position: uint32(offset / size), raw: raw})
 		r.batch.read += uint64(len(raw))
 		if len(r.batch.blocks) == cloneBatch {
 			if err := r.send(); err != nil {
@@ -449,93 +464,182 @@ func (r *diskReader) send() error {
 	}
 }
 
-func isEmpty(b []byte) bool {
-	for _, v := range b {
-		if v != 0 {
-			return false
+// sendBatch is a request ready for the server.
+type sendBatch struct {
+	body   []byte
+	blocks uint64 // places of the disk it covers
+	read   uint64 // bytes taken from the disk for it
+	err    error
+}
+
+// packer turns batches read from the disk into requests, on a goroutine of its own.
+type packer struct {
+	c     *cloneRun
+	ctx   context.Context
+	stop  <-chan struct{}
+	in    <-chan readBatch
+	out   chan<- sendBatch
+	free  chan<- []byte
+	zeros []byte    // a block of zeros to compare with
+	bufs  sync.Pool // *[]byte with room for one compressed block, used again
+}
+
+func (p *packer) run() error {
+	rec := p.c.w.rec
+	for {
+		waited := rec.Time(workPackWaits)
+		b, ok := <-p.in
+		waited()
+		if !ok {
+			return nil
+		}
+		if b.err != nil {
+			return b.err
+		}
+		body, err := p.pack(b.blocks)
+		if b.slab != nil {
+			p.free <- b.slab // the request holds its own copy of everything
+		}
+		if err != nil {
+			return err
+		}
+		waited = rec.Time(workPackSendWaits)
+		select {
+		case p.out <- sendBatch{body: body, blocks: uint64(len(b.blocks)), read: b.read}:
+			waited()
+		case <-p.stop:
+			return errReadStopped
 		}
 	}
-	return true
 }
 
-// flush sends a batch: first hashes, then only the blocks the server lacks.
-func (c *cloneRun) flush(batch readBatch) error {
-	hashes := make([]proto.Sum, len(batch.blocks))
-	for i, b := range batch.blocks {
-		hashes[i] = b.hash
+// pack hashes a batch, asks the server which blocks it lacks and builds the
+// request: hashes for every place, data only for the missing blocks.
+func (p *packer) pack(blocks []pending) ([]byte, error) {
+	rec := p.c.w.rec
+	// Used and all zeros: deploy must overwrite such a place, so it stays in the
+	// index as a zero entry, with no data.
+	hashed := rec.Time(workHash)
+	err := forEach(len(blocks), func(i int) error {
+		b := &blocks[i]
+		if bytes.Equal(b.raw, p.zeros[:len(b.raw)]) {
+			b.raw = nil
+		} else {
+			b.hash = proto.HashBlock(b.raw)
+		}
+		return nil
+	})
+	hashed()
+	if err != nil {
+		return nil, err
 	}
-	rec := c.w.rec
+	hashes := make([]proto.Sum, len(blocks))
+	for i, b := range blocks {
+		hashes[i] = b.hash
+		if b.raw == nil {
+			rec.Count("нулевых блоков", 1)
+		} else {
+			rec.Count("блоков с данными", 1)
+		}
+	}
 	checked := rec.Time(workCheck)
-	missing, err := c.w.client.cloneCheck(c.task, hashes)
+	missing, err := p.c.w.client.cloneCheck(p.ctx, p.c.task, hashes)
 	checked()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	body, err := c.encode(batch.blocks, missing)
-	if err != nil {
-		return err
-	}
-	uploaded := rec.Time(workUpload)
-	err = c.w.client.clonePut(c.task, body)
-	uploaded()
-	if err != nil {
-		return err
-	}
-	rec.Bytes("отправлено по сети", uint64(len(body)))
-	rec.Count("пачек", 1)
-	c.read += batch.read
-	c.sent += uint64(len(body))
-	c.done += uint64(len(batch.blocks))
-	return c.report()
+	return p.encode(blocks, missing)
 }
 
-// encode compresses the missing blocks in parallel and builds the request. The
-// request holds its own copy of everything, so the blocks are free afterwards.
-func (c *cloneRun) encode(blocks []pending, missing []byte) ([]byte, error) {
+// encode compresses the missing blocks in parallel and builds the request in one
+// buffer of the right size. The request holds its own copy of everything, so the
+// blocks and the compression buffers are free afterwards.
+func (p *packer) encode(blocks []pending, missing []byte) ([]byte, error) {
+	rec := p.c.w.rec
 	records := make([]proto.PutRecord, len(blocks))
-	errs := make([]error, len(blocks))
-	slots := make(chan struct{}, runtime.NumCPU())
-	var wg sync.WaitGroup
+	send := make([]bool, len(blocks))
 	seen := map[proto.Sum]bool{}
-	rec := c.w.rec
-	compressed := rec.Time(workCompress)
 	for i, b := range blocks {
 		records[i] = proto.PutRecord{Partition: b.partition, Position: b.position, Hash: b.hash}
 		switch {
 		case b.raw == nil:
-			continue
 		case missing[i] == 0:
 			rec.Count("блоков уже было на сервере", 1)
-			continue
 		case seen[b.hash]:
-			rec.Count("повторов внутри пачки", 1)
-			continue // equal blocks in one batch travel once
+			rec.Count("повторов внутри пачки", 1) // equal blocks in one batch travel once
+		default:
+			rec.Count("новых блоков отправлено", 1)
+			seen[b.hash], send[i] = true, true
 		}
-		rec.Count("новых блоков отправлено", 1)
-		seen[b.hash] = true
-		wg.Add(1)
-		slots <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-slots }()
-			errs[i] = recovery.Run(func() error { // a panic here would end the whole agent
-				h, payload, err := proto.EncodeHashed(b.raw, b.hash)
-				records[i].Block, records[i].Payload = &h, payload
-				return err
-			})
-		}()
 	}
-	wg.Wait()
+
+	bufs := make([]*[]byte, len(blocks))
+	defer func() {
+		for _, buf := range bufs {
+			if buf != nil {
+				p.bufs.Put(buf)
+			}
+		}
+	}()
+	compressed := rec.Time(workCompress)
+	err := forEach(len(blocks), func(i int) error {
+		if !send[i] {
+			return nil
+		}
+		bufs[i] = p.bufs.Get().(*[]byte)
+		h, payload, err := proto.EncodeHashedInto((*bufs[i])[:0], blocks[i].raw, blocks[i].hash)
+		records[i].Block, records[i].Payload = &h, payload
+		return err
+	})
 	compressed()
-	if err := errors.Join(errs...); err != nil {
+	if err != nil {
 		return nil, err
 	}
+
 	defer rec.Time(workBuild)()
-	var body []byte
+	size := 0
+	for _, r := range records {
+		size += proto.PutRecordSize(r)
+	}
+	body := make([]byte, 0, size)
 	for _, r := range records {
 		body = proto.AppendPut(body, r)
 	}
 	return body, nil
+}
+
+// forEach runs f for 0..n-1 on all cores and returns the errors. A panic in f is an
+// error, as it would otherwise end the whole agent.
+func forEach(n int, f func(i int) error) error {
+	errs := make([]error, n)
+	slots := make(chan struct{}, runtime.NumCPU())
+	var wg sync.WaitGroup
+	for i := range n {
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			errs[i] = recovery.Run(func() error { return f(i) })
+		})
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// send puts a request on the server and counts what it carried.
+func (c *cloneRun) send(b sendBatch) error {
+	rec := c.w.rec
+	uploaded := rec.Time(workUpload)
+	err := c.w.client.clonePut(c.task, b.body)
+	uploaded()
+	if err != nil {
+		return err
+	}
+	rec.Bytes("отправлено по сети", uint64(len(b.body)))
+	rec.Count("пачек", 1)
+	c.read += b.read
+	c.sent += uint64(len(b.body))
+	c.done += b.blocks
+	return c.report()
 }
 
 // report updates the screen and, now and then, the panel.

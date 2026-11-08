@@ -96,6 +96,7 @@ type session struct {
 	file   *os.File
 	buf    *bufio.Writer
 	writer *proto.Writer
+	closed bool // discarded: a request still under way finds nothing to write to
 
 	active atomic.Int64 // unix time of the last request
 }
@@ -104,10 +105,19 @@ func (s *session) touch() { s.active.Store(time.Now().Unix()) }
 
 func (s *session) seen() time.Time { return time.Unix(s.active.Load(), 0) }
 
-// discard releases the file and removes what was received.
+// discard releases the file and removes what was received. The caller holds s.mu:
+// a request may be between two records, and must find the session closed.
 func (s *session) discard() {
+	s.closed = true
 	s.file.Close()
 	os.Remove(s.path)
+}
+
+// discardNow is discard for a caller that does not hold the lock of the session.
+func (s *session) discardNow() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.discard()
 }
 
 // Claim gives a task the turn to clone an image, or ErrBusy while another task has
@@ -144,7 +154,7 @@ func (m *Manager) claim(ctx context.Context, task int64, image string) error {
 		if open {
 			return ErrBusy
 		}
-		s.discard() // its task was cancelled and its agent never said so
+		s.discardNow() // its task was cancelled and its agent never said so
 		delete(m.sessions, id)
 	}
 	m.claims[image] = task
@@ -189,7 +199,7 @@ func (m *Manager) Start(ctx context.Context, task int64, image, mac string) (pro
 	}
 	defer m.mu.Unlock()
 	if old := m.sessions[task]; old != nil {
-		old.discard()
+		old.discardNow()
 		delete(m.sessions, task)
 	}
 	if err := m.claim(ctx, task, image); err != nil {
@@ -324,6 +334,9 @@ func (m *Manager) Check(task int64, hashes []proto.Sum) ([]byte, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrNoSession
+	}
 	started := time.Now()
 	defer func() { m.note(task, statCheck, time.Since(started)) }()
 	missing := make([]byte, len(hashes))
@@ -341,8 +354,6 @@ func (m *Manager) Put(task int64, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	// Timed per record and noted once, so a request costs two lock rounds and not
 	// two per block.
 	var receiving, writing time.Duration
@@ -353,6 +364,9 @@ func (m *Manager) Put(task int64, r io.Reader) error {
 		m.count(task, "записано в файл образа", stored, true)
 	}()
 	for {
+		// The network is read without the lock, which is taken for one record at a
+		// time: the agent asks about the hashes of its next batch while this one is
+		// still coming, and must not wait for the whole of it.
 		at := time.Now()
 		rec, err := proto.ReadPut(r)
 		receiving += time.Since(at)
@@ -363,21 +377,37 @@ func (m *Manager) Put(task int64, r io.Reader) error {
 			return err
 		}
 		at = time.Now()
-		if rec.Block != nil {
-			if rec.Block.Hash != rec.Hash {
-				return fmt.Errorf("%w: record names another block", proto.ErrCorrupt)
-			}
-			if err := s.writer.WriteBlock(*rec.Block, rec.Payload); err != nil {
-				return err
-			}
-			stored += uint64(proto.BlockHeaderSize + len(rec.Payload))
-		}
-		err = s.writer.Put(rec.Partition, rec.Position, rec.Hash)
+		n, err := s.store(rec)
 		writing += time.Since(at)
+		stored += n
 		if err != nil {
 			return err
 		}
 	}
+}
+
+// store writes one record under the lock of the session and returns the bytes it
+// added to the file. A block the file already has is not written again: a check
+// made while an earlier batch was arriving may have asked for it twice.
+func (s *session) store(rec proto.PutRecord) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, ErrNoSession
+	}
+	var n uint64
+	if rec.Block != nil {
+		if rec.Block.Hash != rec.Hash {
+			return 0, fmt.Errorf("%w: record names another block", proto.ErrCorrupt)
+		}
+		if !s.writer.Has(rec.Hash) {
+			n = uint64(proto.BlockHeaderSize + len(rec.Payload))
+		}
+		if err := s.writer.WriteBlock(*rec.Block, rec.Payload); err != nil {
+			return 0, err
+		}
+	}
+	return n, s.writer.Put(rec.Partition, rec.Position, rec.Hash)
 }
 
 // Finish completes the file and publishes it as the next version. On failure
@@ -392,6 +422,9 @@ func (m *Manager) Finish(ctx context.Context, task int64, manifest proto.Manifes
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return proto.CloneResult{}, ErrNoSession
+	}
 	started := time.Now()
 	defer func() { m.note(task, statFinish, time.Since(started)) }()
 

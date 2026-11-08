@@ -276,18 +276,39 @@ func EncodeBlock(raw []byte) (BlockHeader, []byte, error) {
 
 // EncodeHashed is EncodeBlock for a caller that already has the hash of raw.
 func EncodeHashed(raw []byte, hash Sum) (BlockHeader, []byte, error) {
+	return EncodeHashedInto(nil, raw, hash)
+}
+
+// EncodeHashedInto is EncodeHashed that compresses into dst, an empty slice the
+// caller reuses; with MaxEncodedSize of room it never has to grow. The payload is
+// dst or, for data that does not shrink, raw itself.
+func EncodeHashedInto(dst, raw []byte, hash Sum) (BlockHeader, []byte, error) {
 	enc, _, err := codecs()
 	if err != nil {
 		return BlockHeader{}, nil, err
 	}
+	if dst == nil {
+		// Room for the worst case: a buffer that has to grow is copied each time,
+		// which on data that does not compress cost more than the compression.
+		dst = make([]byte, 0, enc.MaxEncodedSize(len(raw)))
+	}
 	h := BlockHeader{Raw: uint32(len(raw)), Codec: CodecZstd, Hash: hash}
-	payload := enc.EncodeAll(raw, make([]byte, 0, len(raw)/2))
+	payload := enc.EncodeAll(raw, dst[:0])
 	if len(payload) >= len(raw) {
 		h.Codec, payload = CodecNone, raw
 	}
 	h.Stored = uint32(len(payload))
 	h.CRC32 = h.checksum(payload)
 	return h, payload, nil
+}
+
+// MaxEncodedSize is the room EncodeHashedInto may need for n bytes.
+func MaxEncodedSize(n int) int {
+	enc, _, err := codecs()
+	if err != nil {
+		return n + n/8 + 1024
+	}
+	return enc.MaxEncodedSize(n)
 }
 
 // DecodeBlock verifies a stored block and returns its raw data.

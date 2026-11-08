@@ -353,3 +353,76 @@ func TestCleanIncomingRemovesWhatAStopLeft(t *testing.T) {
 		t.Fatalf("a file that is not a .part went: %v", err)
 	}
 }
+
+// TestCheckDoesNotWaitForAPut: while the records of one batch are still coming, the
+// agent asks about the hashes of the next one, and gets its answer at once.
+func TestCheckDoesNotWaitForAPut(t *testing.T) {
+	m, _, _ := setup(t)
+	if _, err := m.Start(ctx, 1, "win11", mac); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Abort(1)
+	h, payload, _ := proto.EncodeBlock(block(1))
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- m.Put(1, pr) }()
+	pw.Write(proto.AppendPut(nil, proto.PutRecord{Partition: 3, Position: 0, Hash: h.Hash, Block: &h, Payload: payload}))
+
+	answered := make(chan []byte, 1)
+	go func() {
+		missing, _ := m.Check(1, []proto.Sum{h.Hash, proto.HashBlock(block(2))})
+		answered <- missing
+	}()
+	select {
+	case missing := <-answered:
+		// The first block may or may not be stored yet; the second is surely missing.
+		if len(missing) != 2 || missing[1] != 1 {
+			t.Fatalf("missing %v", missing)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Check waited for the whole Put")
+	}
+	pw.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+}
+
+// TestBlockSentTwiceIsStoredOnce: a check made while an earlier batch was arriving
+// may ask for a block that batch brings; the second copy costs no space.
+func TestBlockSentTwiceIsStoredOnce(t *testing.T) {
+	m, _, _ := setup(t)
+	if _, err := m.Start(ctx, 1, "win11", mac); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer m.Abort(1)
+	h, payload, _ := proto.EncodeBlock(block(1))
+	for pos := range uint32(2) {
+		body := proto.AppendPut(nil, proto.PutRecord{Partition: 3, Position: pos, Hash: h.Hash, Block: &h, Payload: payload})
+		if err := m.Put(1, bytes.NewReader(body)); err != nil {
+			t.Fatalf("Put %d: %v", pos, err)
+		}
+	}
+	_, amounts := m.ServerStats(1)
+	if len(amounts) != 1 || amounts[0].Value != uint64(proto.BlockHeaderSize+len(payload)) {
+		t.Fatalf("amounts %+v", amounts)
+	}
+}
+
+// TestPutAfterAbortWritesNothing: a request still under way when its clone is
+// dropped finds the session closed instead of writing into a removed file.
+func TestPutAfterAbortWritesNothing(t *testing.T) {
+	m, _, _ := setup(t)
+	if _, err := m.Start(ctx, 1, "win11", mac); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	s, err := m.session(1)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	m.Abort(1)
+	h, payload, _ := proto.EncodeBlock(block(1))
+	if _, err := s.store(proto.PutRecord{Partition: 3, Position: 0, Hash: h.Hash, Block: &h, Payload: payload}); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("store: %v", err)
+	}
+}
