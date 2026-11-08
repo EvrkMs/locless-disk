@@ -92,6 +92,9 @@ type Config struct {
 	Clone    CloneManager                // receives images
 	Deploy   DeployManager               // sends images
 	Log      *slog.Logger
+	// MetricsDir gets a JSON file with the metrics of every task, for tools that
+	// compare runs or draw them; "" keeps them only in the database.
+	MetricsDir string
 
 	boots *bootClock // made by New
 }

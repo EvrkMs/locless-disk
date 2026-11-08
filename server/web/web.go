@@ -19,6 +19,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"fogs/server/scenario"
 	"fogs/server/store"
 )
 
@@ -76,6 +77,14 @@ type Config struct {
 	Changed   func()          // the settings the client services depend on changed; may be nil
 	Addresses func() []string // IPv4 addresses of the machine clients could use
 	Bind      string          // the client address fixed at start with -bind, if any
+	Scenarios Scenarios       // the measuring scenario of -dev; nil without it
+}
+
+// Scenarios runs the measuring scenario: deploy, delta clone, whole clone.
+type Scenarios interface {
+	Start(ctx context.Context, hostID int64, host, image string) (scenario.Run, error)
+	Stop(ctx context.Context) error
+	Runs() []scenario.Run
 }
 
 // Status says whether PCs of the club are being served.
@@ -111,6 +120,10 @@ func New(c Config) http.Handler {
 	})
 	mux.HandleFunc("GET /api/state", h.state)
 	mux.HandleFunc("GET /api/tasks/{id}/metrics", h.taskMetrics)
+	if c.Scenarios != nil {
+		mux.HandleFunc("POST /api/scenarios", h.startScenario)
+		mux.HandleFunc("DELETE /api/scenarios", h.stopScenario)
+	}
 	mux.HandleFunc("POST /api/hosts", h.addHost)
 	mux.HandleFunc("PATCH /api/hosts/{id}", h.renameHost)
 	mux.HandleFunc("DELETE /api/hosts/{id}", h.deleteHost)
@@ -188,8 +201,13 @@ func (h *server) state(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Status != nil {
 		status = h.cfg.Status()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"hosts": hosts, "discovered": discovered, "images": images, "tasks": tasks,
-		"storageOffline": offline, "server": status})
+	out := map[string]any{"hosts": hosts, "discovered": discovered, "images": images, "tasks": tasks,
+		"storageOffline": offline, "server": status}
+	if h.cfg.Scenarios != nil {
+		out["dev"] = true
+		out["scenarios"] = h.cfg.Scenarios.Runs()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // changed tells the client services to look at the settings again.

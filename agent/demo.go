@@ -29,7 +29,8 @@ func demoState(phase ui.Phase, elapsed time.Duration) ui.State {
 	case ui.PhaseCapture, ui.PhaseDeploy:
 		s.Percent = float64(elapsed%demoCycle) / float64(demoCycle) * 100
 		s.Center = fmt.Sprintf("%.0f%%", s.Percent)
-		s.Caption = fmt.Sprintf("112 МБ/с · %d мин", max(1, int((100-s.Percent)/12)))
+		s.Caption = fmt.Sprintf("записано %.1f ГБ", s.Percent*0.4)
+		s.Rates = []ui.Rate{{Label: "Запись на диск", Value: "126 МБ/с"}, {Label: "Сеть ↓ загрузка", Value: "106 МБ/с"}, {Label: "Сеть ↑ отдача", Value: "64 КБ/с"}}
 		s.Title, s.Detail = "Установка образа", "win11-club · не выключайте компьютер"
 		if phase == ui.PhaseCapture {
 			s.Title = "Отправка образа"

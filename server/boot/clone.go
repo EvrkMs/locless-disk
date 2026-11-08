@@ -32,6 +32,8 @@ type CloneManager interface {
 	// ServerStats returns what the server did for a task: time by kind of work and
 	// amounts, for the metrics of the task.
 	ServerStats(task int64) ([]proto.MetricTime, []proto.MetricAmount)
+	// ResetStats starts them over for a new attempt of the task.
+	ResetStats(task int64)
 }
 
 // ownTask checks that the sender owns this active task of the given kind. A

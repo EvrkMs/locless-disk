@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -275,7 +276,7 @@ func TestMetricsReachTheLog(t *testing.T) {
 		Work:    []proto.MetricTime{{Name: "запись ждёт загрузку", Ms: 30000}},
 		Amounts: []proto.MetricAmount{{Name: "записано на диск", Value: 3 << 20, Bytes: true}, {Name: "пачек", Value: 7}},
 	}
-	saveMetrics(context.Background(), c, testMAC, task.ID, m)
+	saveMetrics(context.Background(), c, testMAC, task.ID, m, metricsReport{Kind: "result", OK: true})
 	for _, want := range []string{"total=1m1s", "steps.Загрузка и запись блоков\"=1m0s", "work.запись ждёт загрузку\"=30s",
 		"amounts.записано на диск, MiB\"=3", "amounts.пачек=7"} {
 		if !strings.Contains(log.String(), want) {
@@ -367,5 +368,76 @@ func TestBootTimeReachesTheMetrics(t *testing.T) {
 	var m proto.TaskMetrics
 	if err := json.Unmarshal([]byte(data), &m); err != nil || m.Server == nil || m.Server.BootMs < 20 {
 		t.Fatalf("metrics %q, err %v", data, err)
+	}
+}
+
+// TestNewAttemptStartsServerStatsOver: the agent sends the metrics of one attempt,
+// so the server must not add the attempts before it to its side.
+func TestNewAttemptStartsServerStatsOver(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "fogs.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ctx := context.Background()
+	if err := s.SetSetting(ctx, store.SettingImageDir, t.TempDir()); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	host, _ := s.AddHost(ctx, testMAC, "PC-12")
+	task, err := s.CreateTask(ctx, host.ID, store.TaskClone, "win11")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	no := func(net.HardwareAddr) bool { return false }
+	images := imaging.New(s, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := New(Config{HTTPAddr: "192.168.88.105:8080", Known: no, HasTask: no, Started: func(net.HardwareAddr) {},
+		Files: fstest.MapFS{}, Agent: s, Clone: images, Deploy: images, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+
+	if _, err := images.Start(ctx, task.ID, "win11", testMAC.String()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	images.Abort(task.ID)
+	if work, _ := images.ServerStats(task.ID); len(work) == 0 {
+		t.Fatal("the first attempt left no stats")
+	}
+	if w := call(h, http.MethodGet, "/agent/task?mac="+testMAC.String(), nil); w.Code != http.StatusOK {
+		t.Fatalf("task: %d", w.Code)
+	}
+	if work, amounts := images.ServerStats(task.ID); work != nil || amounts != nil {
+		t.Fatalf("the new attempt kept %+v %+v", work, amounts)
+	}
+}
+
+// TestMetricsGoToAFile: every attempt leaves a JSON file a tool can read without
+// the database, and a later report of the same attempt replaces it.
+func TestMetricsGoToAFile(t *testing.T) {
+	_, s, host := agentServer(t)
+	ctx := context.Background()
+	task, err := s.CreateTask(ctx, host.ID, store.TaskDeploy, "win11")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	dir := t.TempDir()
+	c := Config{Agent: s, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), MetricsDir: dir}
+	m := &proto.TaskMetrics{Attempt: 2, TotalMs: 5000}
+	saveMetrics(ctx, c, testMAC, task.ID, m, metricsReport{Kind: "failure", Message: "диск пропал"})
+	m = &proto.TaskMetrics{Attempt: 2, TotalMs: 9000}
+	saveMetrics(ctx, c, testMAC, task.ID, m, metricsReport{Kind: "result", OK: true, Message: "готово"})
+
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 || entries[0].Name() != "task-"+strconv.FormatInt(task.ID, 10)+"-attempt-2.json" {
+		t.Fatalf("files %v", entries)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var rec MetricsRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rec.Task != task.ID || rec.Kind != store.TaskDeploy || rec.Image != "win11" || rec.Host != "PC-12" ||
+		rec.MAC != testMAC.String() || rec.Report != "result" || !rec.OK || rec.Metrics.TotalMs != 9000 {
+		t.Fatalf("record %+v", rec)
 	}
 }

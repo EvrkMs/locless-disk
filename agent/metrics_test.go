@@ -54,6 +54,14 @@ func TestRecorderCountsStepsWorkAndAmounts(t *testing.T) {
 	if again := r.Result(); again.Steps[0].Ms != 4000 || len(again.Steps) != 2 {
 		t.Fatalf("second result %+v", again.Steps)
 	}
+
+	r.Note("Диск", "первый")
+	r.Note("Сжатие тома", "не сжат")
+	r.Note("Диск", "второй") // a note of the same name replaces the first
+	want2 := []proto.MetricNote{{Name: "Диск", Value: "второй"}, {Name: "Сжатие тома", Value: "не сжат"}}
+	if got := r.Result().Notes; !slices.Equal(got, want2) {
+		t.Fatalf("notes %+v", got)
+	}
 }
 
 // TestRecorderKeepsShortWork: a block is hashed in well under a millisecond, and
@@ -114,6 +122,15 @@ func amount(m proto.TaskMetrics, name string) uint64 {
 	return 0
 }
 
+func note(m proto.TaskMetrics, name string) string {
+	for _, n := range m.Notes {
+		if n.Name == name {
+			return n.Value
+		}
+	}
+	return ""
+}
+
 func names(list []proto.MetricTime) []string {
 	var out []string
 	for _, x := range list {
@@ -162,7 +179,10 @@ func TestCloneSendsItsMetrics(t *testing.T) {
 
 	m := lastMetrics(t, e.s)
 	checkTimes(t, m)
-	checkServer(t, m, "проверка хэшей", "приём блоков из сети", "запись блоков в файл образа", "сброс и проверка готового файла")
+	checkServer(t, m, "открытие образа", "проверка хэшей", "приём блоков из сети", "запись блоков в файл образа", "сброс и проверка готового файла")
+	if note(m, "Диск") != "тестовый диск" || note(m, "Сжатие тома") != "том сжат: 100 МБ → 40 МБ" {
+		t.Fatalf("notes %+v", m.Notes)
+	}
 	wantSteps := []string{"Открытие диска", "Ожидание очереди на образ", "Сжатие тома", "Чтение диска и отправка",
 		"Возврат размера тома", "Проверка и сохранение на сервере"}
 	if got := names(m.Steps); !slices.Equal(got, wantSteps) {
@@ -213,7 +233,10 @@ func TestDeploySendsItsMetrics(t *testing.T) {
 	if got := names(m.Steps); !slices.Equal(got, wantSteps) {
 		t.Fatalf("steps %v", got)
 	}
-	for _, kind := range []string{workFetch, workDecode, workWrite} {
+	if note(m, "Диск") != "тестовый диск" {
+		t.Fatalf("notes %+v", m.Notes)
+	}
+	for _, kind := range []string{workFetch, workDecode, workWrite, workFetchWaits, workUnpackWaits, workWriteWaits} {
 		if !slices.Contains(names(m.Work), kind) {
 			t.Fatalf("no %q in %v", kind, names(m.Work))
 		}
@@ -224,5 +247,17 @@ func TestDeploySendsItsMetrics(t *testing.T) {
 	if amount(m, "блоков с данными") != cloneBatch+3 || amount(m, "нулевых блоков") != 1 ||
 		amount(m, "пачек") != 2 || amount(m, "загружено по сети") == 0 {
 		t.Fatalf("amounts %+v", m.Amounts)
+	}
+}
+
+// TestUnshrunkVolumeSaysWhy: a clone that leaves the volume as it is tells why, so
+// a stage of seconds with nothing to give back afterwards is not a mystery.
+func TestUnshrunkVolumeSaysWhy(t *testing.T) {
+	e := newCloneEnv(t)
+	blocks := map[uint32][]byte{0: fill(1, testBlock)}
+	e.run(t, &fakeDisk{blocks: blocks, size: 10 * testBlock, noShrink: true})
+	m := lastMetrics(t, e.s)
+	if got := note(m, "Сжатие тома"); got != "не сжат: сжатие: том уже почти полон, сжимать нечего" {
+		t.Fatalf("note %q", got)
 	}
 }

@@ -70,6 +70,7 @@ type worker struct {
 	failed     atomic.Bool            // the error screen is up, so a reboot cannot break anything
 	rec        *recorder              // metrics of the clone or deploy running now, nil otherwise
 	attempts   int                    // tries of the task since this boot, for the metrics
+	shrinkSaid string                 // the last word of Shrink about the volume, for the metrics
 }
 
 // Stages of the link check, in order.

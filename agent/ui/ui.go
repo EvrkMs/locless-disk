@@ -62,6 +62,13 @@ type State struct {
 	Stages  []Stage  // step list
 	Log     []string // last lines are shown
 	Hint    string   // bottom right
+	Rates   []Rate   // speeds under the step list, at most three
+}
+
+// Rate is one speed on the screen, such as the disk or the network.
+type Rate struct {
+	Label string
+	Value string
 }
 
 // The screen is laid out on this reference size and scaled to the real one.
@@ -130,6 +137,11 @@ func Render(dst *image.RGBA, s State, t time.Duration) {
 	c.text(570, 262, s.Detail, 26, regular, colSoft)
 	for i, st := range s.Stages {
 		c.stage(570, 325+float64(i)*46, st, col, breath)
+	}
+	for i, r := range s.Rates[:min(len(s.Rates), 3)] {
+		x := 570 + float64(i)*220
+		c.text(x, 508, r.Label, 20, regular, colMuted)
+		c.text(x, 545, r.Value, 30, medium, colText)
 	}
 
 	c.line(60, 570, 1220, 570, 1, colTrack)

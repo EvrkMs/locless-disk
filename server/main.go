@@ -29,6 +29,7 @@ import (
 	"fogs/server/boot"
 	"fogs/server/dhcp"
 	"fogs/server/imaging"
+	"fogs/server/scenario"
 	"fogs/server/store"
 	"fogs/server/tftp"
 	"fogs/server/web"
@@ -52,6 +53,7 @@ func main() {
 	flag.StringVar(&cfg.bootFile, "bootfile", boot.ShimPath, `first-stage boot file, relative to EFI\`)
 	flag.IntVar(&cfg.httpPort, "http-port", 8080, "port of the HTTP server for clients")
 	flag.StringVar(&cfg.log, "log", filepath.Join(dataDir, "locless.log"), "log file, a relative path is inside -root; a crash no code could catch goes to the same name with .crash")
+	flag.BoolVar(&cfg.dev, "dev", false, "development: the panel offers a measuring scenario that deploys and clones a test PC")
 	verbose := flag.Bool("v", false, "log debug messages")
 	flag.Parse()
 
@@ -98,6 +100,15 @@ func keepCrashes(path string, log *slog.Logger) {
 	}
 }
 
+// scenarios hands the panel the runner, or nothing without -dev. A nil runner
+// must become a nil interface, not one that holds a nil pointer.
+func scenarios(r *scenario.Runner) web.Scenarios {
+	if r == nil {
+		return nil
+	}
+	return r
+}
+
 // config holds the command line.
 type config struct {
 	root     string
@@ -107,6 +118,7 @@ type config struct {
 	bootFile string
 	httpPort int
 	log      string
+	dev      bool
 }
 
 // resolve makes the root absolute and the database and the log paths inside it,
@@ -228,6 +240,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	if err := checkAdminAddr(cfg.admin); err != nil {
 		return err
 	}
+	metricsDir := filepath.Join(cfg.root, dataDir, "metrics") // a JSON file per attempt of a task
 	efiPath := filepath.Join(cfg.root, efiDir)
 	if err := os.MkdirAll(efiPath, 0o755); err != nil {
 		return err
@@ -340,6 +353,8 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 			Clone:    images,
 			Deploy:   images,
 			Log:      log.With("service", "http"),
+
+			MetricsDir: metricsDir,
 		}))
 		return []service{
 			{"proxyDHCP", udpService(addr, dhcp.ServerPort, proxy.ServeDHCP)},
@@ -367,6 +382,11 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	}
 	clients := newSupervisor(log.With("service", "clients"), resolve, clientServices)
 
+	var runner *scenario.Runner
+	if cfg.dev {
+		runner = &scenario.Runner{Store: db, Log: log.With("service", "scenario"), MetricsDir: metricsDir}
+	}
+
 	panel := web.New(web.Config{
 		Store: db, Images: images, Addr: cfg.admin, Root: efiPath, Log: log.With("service", "panel"),
 		Status: func() web.Status {
@@ -382,7 +402,8 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 			}
 			return list
 		},
-		Bind: cfg.bind,
+		Bind:      cfg.bind,
+		Scenarios: scenarios(runner),
 	})
 	panelService := httpService(cfg.admin, func() *http.Server {
 		return &http.Server{Handler: recovery.Handler(log.With("service", "panel"), panel), ReadHeaderTimeout: 10 * time.Second}
@@ -398,7 +419,12 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	wg.Go(func() {
 		recovery.Keep(ctx, log, "clients", func() error { clients.run(ctx); return nil })
 	})
-	log.Info("server started", "root", cfg.root, "panel", "http://"+cfg.admin, "db", cfg.db)
+	if runner != nil {
+		wg.Go(func() {
+			recovery.Keep(ctx, log, "scenario", func() error { runner.Run(ctx); return nil })
+		})
+	}
+	log.Info("server started", "root", cfg.root, "panel", "http://"+cfg.admin, "db", cfg.db, "dev", cfg.dev)
 	wg.Wait()
 	return nil
 }

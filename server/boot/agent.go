@@ -33,6 +33,7 @@ type AgentStore interface {
 	ReportProgress(ctx context.Context, mac net.HardwareAddr, id int64, percent int, stage, message string) error
 	FinishTask(ctx context.Context, mac net.HardwareAddr, id int64, ok bool, message string) error
 	SaveMetrics(ctx context.Context, mac net.HardwareAddr, id int64, metrics string) error
+	TaskInfo(ctx context.Context, id int64) (store.HostTask, error)
 }
 
 // addAgentRoutes registers what the agent talks to.
@@ -67,6 +68,9 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 		if task == nil {
 			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+		if c.Clone != nil {
+			c.Clone.ResetStats(task.ID) // a new attempt: its metrics start here
 		}
 		if took, ok := c.boots.agentArrived(mac.String(), task.ID); ok {
 			c.Log.Info("WinPE started", "mac", mac.String(), "task", task.ID, "took", took.Round(100*time.Millisecond).String())
@@ -122,7 +126,7 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 		}
 		// Before the report and whatever its answer: a task cancelled meanwhile keeps
 		// how far it got. SaveMetrics takes only the PC of the task.
-		saveMetrics(r.Context(), c, mac, id, in.Metrics)
+		saveMetrics(r.Context(), c, mac, id, in.Metrics, metricsReport{Kind: "failure", Message: clip(in.Message)})
 		err := c.Agent.ReportProgress(r.Context(), mac, id, in.Percent, clip(in.Stage), clip(in.Message))
 		finishReport(w, c, err)
 	})
@@ -133,7 +137,7 @@ func addAgentRoutes(mux *http.ServeMux, c Config) {
 		if !ok {
 			return
 		}
-		saveMetrics(r.Context(), c, mac, id, in.Metrics)
+		saveMetrics(r.Context(), c, mac, id, in.Metrics, metricsReport{Kind: "result", OK: in.OK, Message: clip(in.Message)})
 		err := c.Agent.FinishTask(r.Context(), mac, id, in.OK, clip(in.Message))
 		if err == nil {
 			c.boots.forget(id)
@@ -210,7 +214,7 @@ const maxMetricEntries = 64
 
 // saveMetrics keeps what the agent measured for a task and writes a short line of
 // it to the log. Metrics only explain a task, so a failure here fails no report.
-func saveMetrics(ctx context.Context, c Config, mac net.HardwareAddr, id int64, m *proto.TaskMetrics) {
+func saveMetrics(ctx context.Context, c Config, mac net.HardwareAddr, id int64, m *proto.TaskMetrics, report metricsReport) {
 	if m == nil {
 		return
 	}
@@ -234,6 +238,9 @@ func saveMetrics(ctx context.Context, c Config, mac net.HardwareAddr, id int64, 
 	if err != nil {
 		c.Log.Warn("metrics not saved", "mac", mac.String(), "task", id, "err", err)
 		return
+	}
+	if err := writeMetricsFile(ctx, c, id, m, report); err != nil {
+		c.Log.Warn("metrics file not written", "task", id, "err", err)
 	}
 	amounts := logAmounts(m.Amounts)
 	c.Log.Info("task metrics", "mac", mac.String(), "task", id,

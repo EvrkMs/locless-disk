@@ -404,7 +404,7 @@ func TestServerStatsOutliveTheSession(t *testing.T) {
 	for i, w := range work {
 		kinds[i] = w.Name
 	}
-	if !slices.Equal(kinds, []string{statReceive, statWriteImage}) || len(amounts) != 1 ||
+	if !slices.Equal(kinds, []string{statOpen, statReceive, statWriteImage}) || len(amounts) != 1 ||
 		amounts[0].Value != uint64(proto.BlockHeaderSize+len(payload)) || !amounts[0].Bytes {
 		t.Fatalf("work %+v, amounts %+v", work, amounts)
 	}

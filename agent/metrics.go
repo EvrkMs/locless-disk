@@ -21,6 +21,7 @@ type recorder struct {
 	steps   []span
 	work    []span // in the order each kind first appeared
 	amounts []proto.MetricAmount
+	notes   []proto.MetricNote
 	peak    uint64 // the most memory the Go runtime was seen holding
 	cpu0    time.Duration
 	gc0     uint64
@@ -100,6 +101,22 @@ func (r *recorder) amount(name string, n uint64, bytes bool) {
 	r.amounts = append(r.amounts, proto.MetricAmount{Name: name, Value: n, Bytes: bytes})
 }
 
+// Note keeps a fact in words; a second note of the same name replaces the first.
+func (r *recorder) Note(name, value string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.notes {
+		if r.notes[i].Name == name {
+			r.notes[i].Value = value
+			return
+		}
+	}
+	r.notes = append(r.notes, proto.MetricNote{Name: name, Value: value})
+}
+
 // Sample notes how much memory the agent holds now. The reports of a task call it,
 // so the peak is seen every few seconds.
 func (r *recorder) Sample() {
@@ -144,6 +161,8 @@ func (r *recorder) Result() *proto.TaskMetrics {
 		Cores:       runtime.NumCPU(),
 		PeakMemory:  peak,
 		GCCycles:    uint32(max(gc, r.gc0) - r.gc0),
+		MemoryTotal: physicalMemory(),
+		Notes:       append([]proto.MetricNote(nil), r.notes...),
 		UIFrames:    frames - r.frames0,
 		UIRenderMs:  (render - r.render0).Milliseconds(),
 		UIPresentMs: (present - r.present0).Milliseconds(),

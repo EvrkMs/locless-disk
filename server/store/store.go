@@ -376,6 +376,30 @@ type HostTask struct {
 	HostID     int64  `json:"hostId"`
 	Host       string `json:"host"`
 	HasMetrics bool   `json:"hasMetrics"` // the agent sent what the task took, see TaskMetrics
+	MAC        string `json:"mac,omitempty"`
+}
+
+// TaskInfo returns one task with its PC, finished or not.
+func (s *Store) TaskInfo(ctx context.Context, id int64) (HostTask, error) {
+	var t HostTask
+	var created int64
+	var finished sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT t.id, t.kind, t.image, t.status, t.created_at, t.finished_at, t.percent, t.stage, t.message, h.id, h.name, h.mac, t.metrics != ''
+		FROM tasks t JOIN hosts h ON h.id = t.host_id WHERE t.id = ?`, id).Scan(
+		&t.ID, &t.Kind, &t.Image, &t.Status, &created, &finished, &t.Percent, &t.Stage, &t.Message, &t.HostID, &t.Host, &t.MAC, &t.HasMetrics)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HostTask{}, ErrNotFound
+	}
+	if err != nil {
+		return HostTask{}, err
+	}
+	t.CreatedAt = fromUnix(created)
+	if finished.Valid {
+		end := fromUnix(finished.Int64)
+		t.FinishedAt = &end
+	}
+	return t, nil
 }
 
 // RecentTasks lists unfinished tasks and then the latest finished ones.

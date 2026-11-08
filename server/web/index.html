@@ -76,6 +76,12 @@ dialog.wide { width: min(640px, calc(100vw - 32px)); }
 .metrics td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .metrics .bar { width: 110px; }
 .metrics p { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+#scenarioHost { flex: 0 1 320px; max-width: 100%; }
+.scenario-note { color: var(--muted); font-size: 13px; padding: 0 18px 12px; margin: 0; }
+.scenario-run { padding: 10px 18px; border-top: 1px solid var(--line); font-size: 13px; color: var(--soft); }
+.scenario-run b { color: var(--text); font-weight: 500; }
+.scenario-run ol { margin: 6px 0 0; padding-left: 20px; }
+.scenario-run .err { color: var(--coral); }
 .mac { font-family: Consolas, ui-monospace, monospace; font-size: 13px; color: var(--soft); }
 .when { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .actions { text-align: right; white-space: nowrap; }
@@ -169,6 +175,16 @@ form input { flex: 1 1 180px; }
       <tbody id="done"></tbody>
     </table>
     <div class="empty" id="noDone">Завершённых задач нет.</div>
+  </section>
+  <section id="devSection" hidden>
+    <div class="head"><h2>Сценарий замера <span class="count">-dev</span></h2></div>
+    <p class="scenario-note">Сервер сам ставит задачи по очереди: развёртывание образа компьютера, дельта-клон в тот же образ и полный клон в новый образ. Каждая задача сохраняет метрики в <code>data\metrics</code>. <b>Диск компьютера будет стёрт.</b></p>
+    <form id="scenarioForm">
+      <select id="scenarioHost" aria-label="Компьютер для замера"></select>
+      <button type="submit" id="scenarioStart">Запустить</button>
+      <button type="button" id="scenarioStop" hidden>Остановить</button>
+    </form>
+    <div id="scenarioRuns"></div>
   </section>
   </div>
 
@@ -559,9 +575,11 @@ async function showMetrics(t) {
   ];
   if (t.finishedAt) summary.push(['С создания задачи до конца', formatMs(new Date(t.finishedAt) - new Date(t.createdAt))]);
   if (m.server && m.server.bootMs) summary.push(['Загрузка WinPE до агента', formatMs(m.server.bootMs)]);
+  for (const note of m.notes || []) summary.push([note.name, note.value]);
   summary.push(
     ['Процессор', formatMs(m.cpuMs) + ` · ${m.cores} ядер, в среднем ${load}% всех ядер`],
-    ['Пик памяти агента (WorkingSet)', formatSize(m.peakMemory)],
+    ['Пик памяти агента (WorkingSet с запуска WinPE)', formatSize(m.peakMemory) +
+      (m.memoryTotal ? ` из ${formatSize(m.memoryTotal)} памяти ПК` : '')],
     ['Сборок мусора', String(m.gcCycles)]);
   if (m.uiFrames) {
     const ui = m.uiRenderMs + m.uiPresentMs;
@@ -734,6 +752,7 @@ async function refresh() {
     const finished = s.tasks.filter(t => t.finishedAt && (!errorsOnly || t.status === 'failed'));
     fill(active, $('active'), $('activeTable'), $('noActive'), $('activeCount'), activeRow);
     fill(finished, $('done'), $('doneTable'), $('noDone'), $('doneCount'), doneRow);
+    showScenarios(s);
     $('taskBadge').textContent = active.length;
     $('taskBadge').hidden = !active.length;
     $('taskBadge').classList.toggle('danger', active.some(stuck));
@@ -820,6 +839,42 @@ $('exitMode').addEventListener('change', async e => {
     showError(err.message);
   }
 });
+
+// The measuring scenario of -dev: one run at a time, its steps as they go.
+const runText = { waiting: 'ждёт', running: 'идёт', done: 'готово', failed: 'ошибка', stopped: 'остановлен' };
+let scenarioHostsKey = '';
+function showScenarios(s) {
+  $('devSection').hidden = !s.dev;
+  if (!s.dev) return;
+  const hosts = s.hosts.filter(h => h.image);
+  const key = hosts.map(h => h.id + h.name + h.image).join('|');
+  if (key !== scenarioHostsKey) { // rebuilt only on a change, so a choice survives the refresh
+    scenarioHostsKey = key;
+    const chosen = $('scenarioHost').value;
+    $('scenarioHost').replaceChildren(...hosts.map(h => el('option', { value: h.id, textContent: `${h.name} · ${h.image}` })));
+    if (hosts.some(h => String(h.id) === chosen)) $('scenarioHost').value = chosen;
+  }
+  const runs = s.scenarios || [];
+  const running = runs.some(r => r.status === 'running');
+  $('scenarioStart').disabled = running || !hosts.length;
+  $('scenarioStop').hidden = !running;
+  $('scenarioRuns').replaceChildren(...runs.map(r => el('div', { className: 'scenario-run' },
+    el('b', { textContent: `${r.id} · ${r.host} · ${r.image} — ${runText[r.status] || r.status}` }),
+    r.error ? el('div', { className: 'err', textContent: r.error }) : '',
+    el('ol', {}, ...r.steps.map(st => el('li', {
+      textContent: `${st.name}${st.image && st.image !== r.image ? ' в ' + st.image : ''} — ${runText[st.status] || st.status}` +
+        (st.task ? ` (задача ${st.task})` : ''),
+    }))))));
+}
+
+$('scenarioForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const option = $('scenarioHost').selectedOptions[0];
+  if (!option || !confirm(`Запустить сценарий на ${option.textContent}? Диск компьютера будет стёрт.`)) return;
+  await act('POST', '/api/scenarios', { hostId: Number(option.value) });
+});
+
+$('scenarioStop').addEventListener('click', () => act('DELETE', '/api/scenarios'));
 
 $('imageForm').addEventListener('submit', async e => {
   e.preventDefault();

@@ -164,6 +164,8 @@ func (m *Manager) Start(ctx context.Context, task int64, image, mac string) (pro
 	if dir == "" {
 		return proto.CloneInfo{}, ErrNoImageDir
 	}
+	opened := time.Now()
+	defer func() { m.note(task, statOpen, time.Since(opened)) }()
 
 	// The index of the parent is read before the lock, which every request of every
 	// clone and deploy needs: a slow disk must hold up only this clone. Under the

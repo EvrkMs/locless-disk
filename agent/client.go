@@ -27,18 +27,22 @@ var errImageBusy = errors.New("image is busy")
 
 // client talks to the FOGs server.
 type client struct {
-	server string
-	mac    string
-	http   *http.Client // short requests
-	bulk   *http.Client // image data
+	server  string
+	mac     string
+	http    *http.Client // short requests
+	bulk    *http.Client // image data
+	traffic *traffic     // bytes both clients moved
 }
 
 func newClient(cfg proto.AgentConfig) *client {
+	t := &traffic{}
+	counted := countingTransport{base: http.DefaultTransport, t: t}
 	return &client{
-		server: cfg.Server,
-		mac:    cfg.MAC,
-		http:   &http.Client{Timeout: 10 * time.Second},
-		bulk:   &http.Client{Timeout: 5 * time.Minute},
+		server:  cfg.Server,
+		mac:     cfg.MAC,
+		http:    &http.Client{Timeout: 10 * time.Second, Transport: counted},
+		bulk:    &http.Client{Timeout: 5 * time.Minute, Transport: counted},
+		traffic: t,
 	}
 }
 

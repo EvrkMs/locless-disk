@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,6 +94,7 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 	}
 	defer src.Close()
 	w.screen.log("диск: " + src.Describe())
+	w.rec.Note("Диск", src.Describe())
 
 	// One clone per image, and the turn comes before the shrink: a volume must not
 	// sit shrunk for as long as somebody else takes.
@@ -115,7 +117,10 @@ func (w *worker) runClone(task *proto.AgentTask) error {
 	if err := w.client.saveTable(table); err != nil {
 		return fmt.Errorf("сервер не сохранил таблицу разделов: %w", err)
 	}
-	shrunk := src.Shrink(w.screen.log)
+	shrunk := src.Shrink(w.shrinkLog())
+	if !shrunk {
+		w.rec.Note("Сжатие тома", "не сжат"+w.shrinkWhy())
+	}
 
 	// Not even a bug in the capture may leave the volume shrunk.
 	var m proto.Manifest
@@ -190,10 +195,32 @@ func (w *worker) capture(task *proto.AgentTask, src source) (proto.Manifest, err
 	w.screen.log(fmt.Sprintf("сервер: образ %s, версия %d", info.Image, info.Version))
 
 	c := cloneRun{w: w, src: src, task: task.ID, blockSize: info.BlockSize, started: time.Now()}
+	c.speeds.update(c.started, "", 0, w.client.traffic) // the start, for the first speed
 	if err := c.readDisk(); err != nil {
 		return proto.Manifest{}, err
 	}
 	return src.Manifest(), nil
+}
+
+// shrinkLog passes what Shrink says to the screen and keeps the last word about
+// the volume for the metrics: whether it was shrunk, and from what size to what.
+func (w *worker) shrinkLog() func(string) {
+	w.shrinkSaid = ""
+	return func(line string) {
+		w.screen.log(line)
+		if strings.HasPrefix(line, "сжатие") || strings.HasPrefix(line, "том сжат") {
+			w.shrinkSaid = line
+			w.rec.Note("Сжатие тома", line)
+		}
+	}
+}
+
+// shrinkWhy is the reason Shrink gave for leaving the volume, if any.
+func (w *worker) shrinkWhy() string {
+	if w.shrinkSaid == "" {
+		return ""
+	}
+	return ": " + w.shrinkSaid
 }
 
 // giveBack returns the volume its size, trying a few times: what fails here is
@@ -262,6 +289,7 @@ type cloneRun struct {
 	done      uint64
 	read      uint64 // bytes taken from the disk
 	sent      uint64 // bytes put on the wire
+	speeds    speeds
 }
 
 // readBatch is what the disk gave for one round. An error ends the reading and
@@ -517,16 +545,17 @@ func (c *cloneRun) report() error {
 	if c.total > 0 {
 		percent = min(int(c.done*100/c.total), 99)
 	}
-	seconds := max(time.Since(c.started).Seconds(), 0.001)
-	caption := formatBytes(uint64(float64(c.read)/seconds)) + "/с"
+	rates, summary := c.speeds.update(time.Now(), "Чтение диска", c.read, c.w.client.traffic)
+	caption := "прочитано " + formatBytes(c.read)
 	c.w.screen.update(func(st *ui.State) {
 		st.Percent, st.Center, st.Caption = float64(percent), fmt.Sprintf("%d%%", percent), caption
+		st.Rates = rates
 	})
 	if time.Since(c.reported) < reportEvery {
 		return nil
 	}
 	c.reported = time.Now()
-	message := fmt.Sprintf("прочитано %s, отправлено %s, %s", formatBytes(c.read), formatBytes(c.sent), caption)
+	message := fmt.Sprintf("прочитано %s, отправлено %s · %s", formatBytes(c.read), formatBytes(c.sent), summary)
 	err := c.w.client.progress(c.task, percent, cloneStages[stageCheck], message)
 	if errors.Is(err, errTaskGone) {
 		return err

@@ -117,6 +117,7 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 	}
 	defer dst.Close()
 	w.screen.log("диск: " + dst.Describe())
+	w.rec.Note("Диск", dst.Describe())
 
 	w.rec.Step("Ожидание очереди на образ")
 	var info proto.DeployInfo
@@ -158,6 +159,7 @@ func (w *worker) runDeploy(task *proto.AgentTask) error {
 	}
 
 	d := deployRun{w: w, dst: dst, task: task.ID, info: info, started: time.Now()}
+	d.speeds.update(d.started, "", 0, w.client.traffic) // the start, for the first speed
 	switch err := d.write(); {
 	case errors.Is(err, errTaskGone):
 		// The disk is already overwritten in part: it must not look finished.
@@ -374,6 +376,7 @@ type deployRun struct {
 	done     int
 	written  uint64
 	sizes    map[uint32]uint64
+	speeds   speeds
 }
 
 // write fills every place of the list on the disk.
@@ -424,6 +427,7 @@ const (
 	workDecode      = "распаковка и проверка"
 	workWrite       = "запись на диск"
 	workUnpackWaits = "распаковка ждёт запись"
+	workFetchWaits  = "загрузка ждёт распаковку"
 	workWriteWaits  = "запись ждёт загрузку"
 )
 
@@ -486,8 +490,10 @@ func (d *deployRun) fetch(ctx context.Context, batches [][]uint32, out chan<- de
 		fetched()
 		d.w.rec.Bytes("загружено по сети", uint64(len(b.body)))
 		d.w.rec.Count("пачек", 1)
+		waited := d.w.rec.Time(workFetchWaits)
 		select {
 		case out <- b:
+			waited()
 		case <-ctx.Done():
 			return
 		}
@@ -514,8 +520,10 @@ func (d *deployRun) unpack(ctx context.Context, in <-chan deployBatch, out chan<
 			b.err = recovery.Run(func() error { return d.decode(&b) })
 			decoded()
 		}
+		waited := d.w.rec.Time(workUnpackWaits)
 		select {
 		case out <- b:
+			waited()
 		case <-ctx.Done():
 			return
 		}
@@ -610,16 +618,17 @@ func (d *deployRun) store(b deployBatch) error {
 func (d *deployRun) report() error {
 	d.w.rec.Sample()
 	percent := min(d.done*100/max(len(d.entries), 1), 99)
-	seconds := max(time.Since(d.started).Seconds(), 0.001)
-	caption := formatBytes(uint64(float64(d.written)/seconds)) + "/с"
+	rates, summary := d.speeds.update(time.Now(), "Запись на диск", d.written, d.w.client.traffic)
+	caption := "записано " + formatBytes(d.written)
 	d.w.screen.update(func(st *ui.State) {
 		st.Percent, st.Center, st.Caption = float64(percent), fmt.Sprintf("%d%%", percent), caption
+		st.Rates = rates
 	})
 	if time.Since(d.reported) < reportEvery {
 		return nil
 	}
 	d.reported = time.Now()
-	err := d.w.client.progress(d.task, percent, deployStages[stageCheck], "записано "+formatBytes(d.written)+", "+caption)
+	err := d.w.client.progress(d.task, percent, deployStages[stageCheck], caption+" · "+summary)
 	if errors.Is(err, errTaskGone) {
 		return err
 	}

@@ -298,7 +298,11 @@ func (v *volumeMap) used(offset, length uint64) bool {
 }
 
 func (d *physicalDisk) Describe() string {
-	return fmt.Sprintf("№%d, %s, разделов: %d", d.number, formatBytes(d.size), len(d.manifest.Partitions))
+	s := fmt.Sprintf("№%d, %s, разделов: %d", d.number, formatBytes(d.size), len(d.manifest.Partitions))
+	if device := describeDevice(d.number); device != "" {
+		s += ", " + device
+	}
+	return s
 }
 
 func (d *physicalDisk) Manifest() proto.Manifest { return d.manifest }

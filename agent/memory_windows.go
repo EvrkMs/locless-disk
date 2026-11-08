@@ -38,3 +38,29 @@ func processPeakMemory() (uint64, bool) {
 	}
 	return uint64(c.peakWorkingSetSize), true
 }
+
+var procGlobalMemoryStatusEx = kernel32.NewProc("GlobalMemoryStatusEx")
+
+// memoryStatusEx is MEMORYSTATUSEX.
+type memoryStatusEx struct {
+	length               uint32
+	memoryLoad           uint32
+	totalPhys            uint64
+	availPhys            uint64
+	totalPageFile        uint64
+	availPageFile        uint64
+	totalVirtual         uint64
+	availVirtual         uint64
+	availExtendedVirtual uint64
+}
+
+// physicalMemory returns the memory of the PC in bytes, 0 if Windows does not say.
+// WinPE lives in it, so it bounds what the agent may use.
+func physicalMemory() uint64 {
+	m := memoryStatusEx{}
+	m.length = uint32(unsafe.Sizeof(m))
+	if r, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&m))); r == 0 {
+		return 0
+	}
+	return m.totalPhys
+}

@@ -73,30 +73,59 @@ func (d *physicalDisk) Shrink(log func(string)) bool {
 		log("сжатие: том уже почти полон, сжимать нечего")
 		return false
 	}
-	mib := (original - target) >> 20
 	d.original = original
-	err := runDiskpart(fmt.Sprintf("select disk %d", d.number), fmt.Sprintf("select partition %d", number),
-		fmt.Sprintf("shrink desired=%d", mib))
+	size, summary, err := shrinkVolume(diskVolume{d, number}, target, log)
 	if err != nil {
-		log("сжатие не удалось, диск снимается как есть: " + err.Error())
-	}
-	// Whatever diskpart did, read the real result. A shrink changes file system
-	// data still held in the cache, and a clone reads past the cache.
-	if err := d.settle(number); err != nil {
-		log("сжатие: " + err.Error())
-	}
-	if err := d.reload(number); err != nil {
 		log("сжатие: " + err.Error())
 		return true // nobody knows what the disk looks like: Repair will find out
 	}
-	for _, p := range d.manifest.Partitions {
-		if p.Number != number || p.Size == original {
-			continue
-		}
-		log(fmt.Sprintf("том сжат: %s → %s", formatBytes(original), formatBytes(p.Size)))
-		return true
+	if size >= original {
+		log("сжатие не удалось, диск снимается как есть: " + summary)
+		return false
 	}
-	return false
+	log("том сжат: " + summary)
+	return true
+}
+
+// diskVolume is the Windows volume of a partition, shrunk by diskpart.
+type diskVolume struct {
+	d      *physicalDisk
+	number uint32
+}
+
+// size reads the result from the disk. A shrink changes file system data still
+// held in the cache, and a clone reads past the cache, so the volume is settled
+// first.
+func (v diskVolume) size() (uint64, error) {
+	if err := v.d.settle(v.number); err != nil {
+		return 0, err
+	}
+	if err := v.d.reload(v.number); err != nil {
+		return 0, err
+	}
+	for _, p := range v.d.manifest.Partitions {
+		if p.Number == v.number {
+			return p.Size, nil
+		}
+	}
+	return 0, fmt.Errorf("раздел %d пропал", v.number)
+}
+
+func (v diskVolume) reclaimable() (uint64, bool, error) {
+	out, err := diskpartOutput(fmt.Sprintf("select disk %d", v.d.number), fmt.Sprintf("select partition %d", v.number),
+		"shrink querymax")
+	if err != nil {
+		return 0, false, err
+	}
+	bytes, ok := parseReclaimable(out)
+	return bytes, ok, nil
+}
+
+// shrinkBy asks for mib and accepts less: minimum lets diskpart shrink by what it
+// can instead of failing outright.
+func (v diskVolume) shrinkBy(mib uint64) error {
+	return runDiskpart(fmt.Sprintf("select disk %d", v.d.number), fmt.Sprintf("select partition %d", v.number),
+		fmt.Sprintf("shrink desired=%d minimum=1", mib))
 }
 
 // mayChange says whether this code may touch the disk: only WinPE may, never a

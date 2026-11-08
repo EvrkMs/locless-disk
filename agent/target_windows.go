@@ -149,10 +149,14 @@ func newWriteDisk(number int) (*writeDisk, error) {
 }
 
 func (w *writeDisk) Describe() string {
+	s := fmt.Sprintf("диск №%d, %s", w.number, formatBytes(w.size))
 	if w.fresh {
-		return fmt.Sprintf("диск №%d, %s, без GPT", w.number, formatBytes(w.size))
+		s += ", без GPT"
 	}
-	return fmt.Sprintf("диск №%d, %s", w.number, formatBytes(w.size))
+	if device := describeDevice(w.number); device != "" {
+		s += ", " + device
+	}
+	return s
 }
 
 // openWritable opens a device so it can be changed.
@@ -599,15 +603,22 @@ func (w *writeDisk) Fit(m proto.Manifest) (proto.Manifest, error) {
 
 // runDiskpart runs a script and returns its last line on failure.
 func runDiskpart(lines ...string) error {
+	_, err := diskpartOutput(lines...)
+	return err
+}
+
+// diskpartOutput runs a script and returns what diskpart printed.
+func diskpartOutput(lines ...string) (string, error) {
 	file := filepath.Join(os.TempDir(), "locless-diskpart.txt")
 	if err := os.WriteFile(file, []byte(strings.Join(lines, "\r\n")+"\r\n"), 0o644); err != nil {
-		return err
+		return "", err
 	}
 	defer os.Remove(file)
-	if out, err := exec.Command("diskpart", "/s", file).CombinedOutput(); err != nil {
-		return fmt.Errorf("diskpart: %w: %s", err, lastLine(out))
+	out, err := exec.Command("diskpart", "/s", file).CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("diskpart: %w: %s", err, lastLine(out))
 	}
-	return nil
+	return string(out), nil
 }
 
 // Grow stretches the file system over the partition, which the table made larger

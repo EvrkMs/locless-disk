@@ -17,7 +17,8 @@ func sample(p Phase, percent float64) State {
 		Host:    "PC-12 · 04:7c:16:e7:d2:1e",
 		Server:  "сервер 192.168.88.105",
 		Center:  "47%",
-		Caption: "112 МБ/с · 3 мин",
+		Caption: "записано 21.4 ГБ",
+		Rates:   []Rate{{"Запись на диск", "126 МБ/с"}, {"Сеть ↓ загрузка", "106 МБ/с"}, {"Сеть ↑ отдача", "64 КБ/с"}},
 		Percent: percent,
 		Title:   "Не удалось записать раздел C:",
 		Detail:  "Сервер уведомлён",
@@ -89,7 +90,7 @@ func TestWritePreviews(t *testing.T) {
 		t.Skip("FOGS_UI_PREVIEW is not set")
 	}
 	idle := sample(PhaseIdle, -1)
-	idle.Center, idle.Caption, idle.Stages = "Агент", "на связи", nil
+	idle.Center, idle.Caption, idle.Stages, idle.Rates = "Агент", "на связи", nil, nil
 	frames := map[string]State{"idle": idle, "deploy": sample(PhaseDeploy, 47), "failed": sample(PhaseFailed, 47)}
 	for name, s := range frames {
 		dst := image.NewRGBA(image.Rect(0, 0, 1280, 720))

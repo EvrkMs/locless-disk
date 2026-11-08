@@ -66,8 +66,13 @@ func (d *fakeDisk) ReadBlock(partition uint32, offset uint64, dst []byte) (bool,
 
 func (d *fakeDisk) Table() ([]byte, error) { return []byte("table"), nil }
 
-func (d *fakeDisk) Shrink(func(string)) bool {
+func (d *fakeDisk) Shrink(log func(string)) bool {
 	d.shrunk = !d.noShrink
+	if d.shrunk {
+		log("том сжат: 100 МБ → 40 МБ")
+	} else {
+		log("сжатие: том уже почти полон, сжимать нечего")
+	}
 	return d.shrunk
 }
 

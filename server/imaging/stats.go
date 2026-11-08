@@ -80,6 +80,11 @@ func (m *Manager) ServerStats(task int64) ([]proto.MetricTime, []proto.MetricAmo
 	return work, append([]proto.MetricAmount(nil), s.amounts...)
 }
 
+// ResetStats starts the stats of a task over. The agent asks for its task at the
+// start of every attempt, and its metrics are of that attempt alone; the server
+// side must not add up the attempts before it.
+func (m *Manager) ResetStats(task int64) { m.forgetStats(task) }
+
 func (m *Manager) forgetStats(task int64) {
 	m.statsMu.Lock()
 	defer m.statsMu.Unlock()

@@ -76,9 +76,15 @@ type TaskMetrics struct {
 	CPUMs int64 `json:"cpuMs"` // processor time of the agent, all cores together
 	Cores int   `json:"cores"` // logical processors of the PC
 	// PeakMemory is the peak working set of the agent in bytes, as Windows counts
-	// it. Elsewhere it is the most memory the Go runtime was seen holding.
+	// it, since WinPE started the agent: a second attempt includes the first.
+	// Elsewhere it is the most memory the Go runtime was seen holding.
 	PeakMemory uint64 `json:"peakMemory"`
 	GCCycles   uint32 `json:"gcCycles"` // garbage collections during the task
+	// MemoryTotal is the physical memory of the PC in bytes, 0 if unknown.
+	MemoryTotal uint64 `json:"memoryTotal"`
+	// Notes are facts about the task that are not numbers: the disk, whether the
+	// volume was shrunk. They explain the speeds.
+	Notes []MetricNote `json:"notes,omitempty"`
 
 	// The screen of the agent: frames drawn, time to draw them and to put them in
 	// the window. It runs beside the work and takes processor time from it.
@@ -91,8 +97,15 @@ type TaskMetrics struct {
 	Server *ServerMetrics `json:"server,omitempty"`
 }
 
-// MetricsVersion is the current TaskMetrics.V.
-const MetricsVersion = 1
+// MetricsVersion is the current TaskMetrics.V. 2 added the notes, the memory of
+// the PC and the waits inside the deploy pipeline.
+const MetricsVersion = 2
+
+// MetricNote is a named fact in words.
+type MetricNote struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
 
 // ServerMetrics is the side of the server: the agent sees the same requests with
 // the network in them, so the two together tell the network from the server.

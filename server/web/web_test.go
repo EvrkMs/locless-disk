@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"fogs/server/imaging"
+	"fogs/server/scenario"
 	"fogs/server/store"
 )
 
@@ -756,5 +757,65 @@ func TestTaskMetricsAreServed(t *testing.T) {
 	}
 	if w := do(h, http.MethodGet, "/api/tasks/999/metrics", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown task: %d", w.Code)
+	}
+}
+
+// TestScenarioOnlyWithDev: the panel offers the measuring scenario only when the
+// server runs with -dev, and runs it on a PC that has an image.
+func TestScenarioOnlyWithDev(t *testing.T) {
+	plain, _ := panel(t)
+	if w := do(plain, http.MethodPost, "/api/scenarios", `{"hostId":1}`); w.Code == http.StatusCreated {
+		t.Fatal("a scenario without -dev")
+	}
+
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "fogs.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner := &scenario.Runner{Store: s, Log: log, FreeSpace: func(string) (uint64, error) { return 1 << 40, nil }}
+	h := New(Config{Store: s, Images: imaging.New(s, log), Addr: addr, Root: filepath.Join(dir, "root"), Log: log, Scenarios: runner})
+	ctx := context.Background()
+	images := filepath.Join(dir, "images")
+	if err := s.SetSetting(ctx, store.SettingImageDir, images); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	if err := s.AddVersion(ctx, "win11", store.Version{Number: 1, File: "v1.ldisk", Size: 1 << 20}); err != nil {
+		t.Fatalf("AddVersion: %v", err)
+	}
+	os.MkdirAll(filepath.Join(images, "win11"), 0o755)
+	os.WriteFile(filepath.Join(images, "win11", "v1.ldisk"), nil, 0o644)
+	host, err := s.AddHost(ctx, net.HardwareAddr{2, 0, 0, 0, 0, 7}, "PC-07")
+	if err != nil {
+		t.Fatalf("AddHost: %v", err)
+	}
+	body := `{"hostId":` + strconv.FormatInt(host.ID, 10) + `}`
+	if w := do(h, http.MethodPost, "/api/scenarios", body); w.Code != http.StatusConflict {
+		t.Fatalf("a PC without an image: %d %s", w.Code, w.Body)
+	}
+	if err := s.SetHostImage(ctx, host.ID, "win11"); err != nil {
+		t.Fatalf("SetHostImage: %v", err)
+	}
+	if w := do(h, http.MethodPost, "/api/scenarios", body); w.Code != http.StatusCreated {
+		t.Fatalf("start: %d %s", w.Code, w.Body)
+	}
+	w := do(h, http.MethodGet, "/api/state", "")
+	var st struct {
+		Dev       bool
+		Scenarios []scenario.Run
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || !st.Dev || len(st.Scenarios) != 1 || st.Scenarios[0].Steps[0].Task == 0 {
+		t.Fatalf("state %s, err %v", w.Body, err)
+	}
+	if w := do(h, http.MethodPost, "/api/scenarios", body); w.Code != http.StatusConflict {
+		t.Fatalf("second start: %d", w.Code)
+	}
+	if w := do(h, http.MethodDelete, "/api/scenarios", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("stop: %d %s", w.Code, w.Body)
+	}
+	if ok, _ := s.HasTask(ctx, net.HardwareAddr{2, 0, 0, 0, 0, 7}); ok {
+		t.Fatal("the task of a stopped run was left")
 	}
 }
